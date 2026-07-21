@@ -1,0 +1,20 @@
+services:
+  decode:
+    build:
+      context: .
+      dockerfile: Dockerfile.sampling
+    image: video-ai-thesis
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    entrypoint: ["python", "main.py"]
+
+  segment:
+    build:
+      context: .
+      dockerfile: Dockerfile.segmentation
+    image: video-ai-thesis-segmentation
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    entrypoint: ["python", "-m", "src.segmentation"]

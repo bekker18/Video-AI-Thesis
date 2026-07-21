@@ -1,0 +1,4 @@
+transnetv2-pytorch
+open-clip-torch
+timm
+pillow
