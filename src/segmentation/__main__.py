@@ -68,7 +68,11 @@ def main() -> None:
         device=args.device,
     )
 
-    out = args.output if args.output is not None else args.frames_dir / "segmentation"
+    out = (
+        args.output
+        if args.output is not None
+        else args.frames_dir.parent / "segmentation"
+    )
     print(f"Detected {len(shots)} shot(s); wrote {out}/segments.json and keyframes/")
 
 

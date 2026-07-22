@@ -7,6 +7,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./models:/app/models
+      - ./src:/app/src
+      - ./main.py:/app/main.py
     entrypoint: ["python", "main.py"]
 
   segment:
@@ -17,4 +19,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./models:/app/models
+      - ./src:/app/src
     entrypoint: ["python", "-m", "src.segmentation"]

@@ -46,8 +46,12 @@ def main() -> None:
     if video.parent == Path("."):
         video = RAW_DIR / video
 
-    # Default output is a subfolder of data/processed named after the video.
-    output = args.output if args.output is not None else PROCESSED_DIR / video.stem
+    # Default output is data/processed/<video name>/frame.
+    output = (
+        args.output
+        if args.output is not None
+        else PROCESSED_DIR / video.stem / "frames"
+    )
 
     saved = decode(video, output, step=args.step)
     print(f"Saved {saved} frame(s) to {output}")

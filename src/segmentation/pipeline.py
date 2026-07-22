@@ -25,8 +25,12 @@ def segment(
     """Segment sampled frames into shots and select keyframes."""
 
     frames_dir = Path(frames_dir)
+    # Frames live in data/processed/<video>/frame; write segmentation output to
+    # the sibling data/processed/<video>/segmentation directory.
     output_dir = (
-        Path(output_dir) if output_dir is not None else frames_dir / "segmentation"
+        Path(output_dir)
+        if output_dir is not None
+        else frames_dir.parent / "segmentation"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 
