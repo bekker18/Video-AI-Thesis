@@ -1,33 +1,9 @@
 # Video-AI-Thesis
 
-Build the images:
+Pass a full path to decode a video into frames:
 
 ```bash
-docker compose build
-```
-
-Decode a video into frames (input read from `data/raw`, frames written to `data/processed`):
-
-```bash
-docker compose run --rm decode input_example.mp4
-```
-
-Save every 5th frame instead of every frame:
-
-```bash
-docker compose run --rm decode input_example.mp4 -s 5
-```
-
-Write frames to a custom directory:
-
-```bash
-docker compose run --rm decode input_example.mp4 -o data/processed/example
-```
-
-Pass a full path instead of a bare filename:
-
-```bash
-docker compose run --rm decode data/raw/clips/example.mp4
+docker compose run --rm decode data/raw/clips/example.mp4 - data/processed/example
 ```
 
 Segment sampled frames into shots + keyframes (output to `data/processed/<video>/segmentation/`):
