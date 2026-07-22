@@ -1,5 +1,3 @@
-s
-
 # Video-AI-Thesis
 
 Build the image:
