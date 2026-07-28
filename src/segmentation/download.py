@@ -9,9 +9,9 @@ MODELS_DIR = Path("models/segmentation")
 
 _MODELS = [
     (
-        "magnusdtd/TransNetV2",
-        "transnetv2-pytorch-weights.pth",
-        "transnetv2-pytorch-weights.pth",
+        "uva-cv-lab/OmniShotCut",
+        "OmniShotCut_ckpt.pth",
+        "OmniShotCut_ckpt.pth",
     ),
     (
         "apple/MobileCLIP-S2",

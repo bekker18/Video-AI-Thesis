@@ -7,15 +7,16 @@ from pathlib import Path
 from .download import download_models
 from .pipeline import (
     DEFAULT_MOBILECLIP_WEIGHTS,
-    DEFAULT_TRANSNET_WEIGHTS,
+    DEFAULT_OMNISHOTCUT_WEIGHTS,
     segment,
 )
+from .shots import DEFAULT_OVERLAP
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Segment sampled frames into shots with TransNetV2 and select a "
+            "Segment sampled frames into shots with OmniShotCut and select a "
             "representative keyframe per shot with MobileCLIP medoids."
         )
     )
@@ -32,10 +33,10 @@ def main() -> None:
         help="Output directory.",
     )
     parser.add_argument(
-        "--transnet-weights",
+        "--omnishotcut-weights",
         type=Path,
-        default=DEFAULT_TRANSNET_WEIGHTS,
-        help="TransNetV2 PyTorch weights.",
+        default=DEFAULT_OMNISHOTCUT_WEIGHTS,
+        help="OmniShotCut checkpoint.",
     )
     parser.add_argument(
         "--mobileclip-weights",
@@ -44,16 +45,22 @@ def main() -> None:
         help="MobileCLIP checkpoint.",
     )
     parser.add_argument(
-        "-t",
-        "--threshold",
-        type=float,
-        default=0.5,
-        help="Transition probability threshold.",
+        "-m",
+        "--mode",
+        choices=("clean_shot", "default"),
+        default="clean_shot",
+        help="clean_shot keeps general cuts only; default also labels transitions.",
+    )
+    parser.add_argument(
+        "--overlap",
+        type=int,
+        default=DEFAULT_OVERLAP,
+        help="Overlap frames between adjacent inference windows.",
     )
     parser.add_argument(
         "--device",
         default="cpu",
-        help="torch device: cpu, cuda.",
+        help="torch device for MobileCLIP: cpu, cuda. OmniShotCut always uses cuda.",
     )
     args = parser.parse_args()
 
@@ -62,9 +69,10 @@ def main() -> None:
     shots = segment(
         args.frames_dir,
         output_dir=args.output,
-        transnet_weights=args.transnet_weights,
+        omnishotcut_weights=args.omnishotcut_weights,
         mobileclip_weights=args.mobileclip_weights,
-        threshold=args.threshold,
+        mode=args.mode,
+        overlap=args.overlap,
         device=args.device,
     )
 

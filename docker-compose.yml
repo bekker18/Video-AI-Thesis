@@ -21,3 +21,10 @@ services:
       - ./models:/app/models
       - ./src:/app/src
     entrypoint: ["python", "-m", "src.segmentation"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -1,4 +1,4 @@
-"""Shot-boundary detection over sampled frames using TransNetV2."""
+"""Shot-boundary detection over sampled frames using OmniShotCut."""
 
 from __future__ import annotations
 
@@ -6,18 +6,19 @@ from pathlib import Path
 
 import numpy as np
 
-# TransNetV2 consumes 48x27 RGB frames in windows of 100 with a stride of 50, padding 25 frames at each end and keeping the central 50 predictions.
-FRAME_WIDTH = 48
-FRAME_HEIGHT = 27
-WINDOW = 100
-STRIDE = 50
-PAD = 25
+# OmniShotCut resizes any input to the process resolution stored in its
+# checkpoint; this is the fallback when the checkpoint does not advertise one.
+DEFAULT_PROCESS_SIZE = (128, 96)  # (width, height)
+# Overlap frames between adjacent inference windows, as used by the reference CLI.
+DEFAULT_OVERLAP = 20
 
 
 def load_frames(
-    frames_dir: Path, pattern: str = "frame_*.png"
+    frames_dir: Path,
+    size: tuple[int, int] | None = None,
+    pattern: str = "frame_*.png",
 ) -> tuple[np.ndarray, list[Path]]:
-    """Load sampled frames as a (N, 27, 48, 3) uint8 RGB array plus their paths."""
+    """Load sampled frames as a (T, H, W, 3) uint8 RGB array plus their paths."""
 
     import cv2
 
@@ -25,81 +26,67 @@ def load_frames(
     if not paths:
         raise FileNotFoundError(f"No frames matching {pattern!r} in {frames_dir}")
 
-    frames = np.empty((len(paths), FRAME_HEIGHT, FRAME_WIDTH, 3), dtype=np.uint8)
-    for i, path in enumerate(paths):
+    frames: list[np.ndarray] = []
+    for path in paths:
         img = cv2.imread(str(path))
         if img is None:
             raise RuntimeError(f"Failed to read frame: {path}")
-        img = cv2.resize(img, (FRAME_WIDTH, FRAME_HEIGHT), interpolation=cv2.INTER_AREA)
-        frames[i] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    return frames, paths
+        if size is not None:
+            img = cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+        frames.append(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
+    if size is None and len({f.shape for f in frames}) > 1:
+        raise ValueError(
+            "Sampled frames have mixed resolutions; pass size=(width, height)."
+        )
 
-def predictions_to_scenes(
-    predictions: np.ndarray, threshold: float = 0.5
-) -> list[list[int]]:
-    """Convert per-frame transition probabilities into [start, end] shot ranges."""
-
-    preds = (np.asarray(predictions) > threshold).astype(np.uint8)
-
-    scenes: list[list[int]] = []
-    t = t_prev = 0
-    start = 0
-    for i, t in enumerate(preds):
-        if t_prev == 1 and t == 0:
-            start = i
-        if t_prev == 0 and t == 1 and i != 0:
-            scenes.append([start, i])
-        t_prev = t
-    if len(preds) > 0 and t == 0:
-        scenes.append([start, len(preds) - 1])
-
-    if not scenes:
-        return [[0, len(preds) - 1]]
-    return [[int(s), int(e)] for s, e in scenes]
+    return np.stack(frames), paths
 
 
 class ShotDetector:
-    """Wraps the TransNetV2 PyTorch model for inference on sampled frames."""
+    """Wraps the OmniShotCut shot-query Transformer for inference on frames.
 
-    def __init__(self, weights: Path, device: str = "cpu") -> None:
-        import torch
-        from transnetv2_pytorch import TransNetV2
+    OmniShotCut loads its weights onto CUDA, so a GPU is required.
+    """
+
+    def __init__(
+        self,
+        weights: Path,
+        mode: str = "clean_shot",
+        overlap: int = DEFAULT_OVERLAP,
+    ) -> None:
+        import omnishotcut
 
         weights = Path(weights)
         if not weights.exists():
-            raise FileNotFoundError(f"TransNetV2 weights not found: {weights}\n")
+            raise FileNotFoundError(f"OmniShotCut weights not found: {weights}\n")
 
-        self._torch = torch
-        self.device = device
-        self.model = TransNetV2()
-        state_dict = torch.load(str(weights), map_location=device)
-        self.model.load_state_dict(state_dict)
-        self.model.eval().to(device)
+        self.mode = mode
+        self.overlap = overlap
+        self.model = omnishotcut.load(str(weights))
 
-    def predict(self, frames: np.ndarray) -> np.ndarray:
-        """Per-frame transition probabilities for (N, 27, 48, 3) uint8 frames."""
-        torch = self._torch
-        n = len(frames)
+    @property
+    def process_size(self) -> tuple[int, int]:
+        """(width, height) the loaded checkpoint resizes frames to."""
+        args = getattr(self.model, "_model_args", None)
+        width = getattr(args, "process_width", None)
+        height = getattr(args, "process_height", None)
+        if width is None or height is None:
+            return DEFAULT_PROCESS_SIZE
+        return int(width), int(height)
 
-        remainder = n % STRIDE
-        pad_end = PAD + (STRIDE - remainder if remainder != 0 else 0)
-        padded = np.concatenate(
-            [frames[:1]] * PAD + [frames] + [frames[-1:]] * pad_end, axis=0
-        )
+    def detect(
+        self, frames: np.ndarray
+    ) -> tuple[list[list[int]], list[str], list[str]]:
+        """Return [start, end] (inclusive) shot ranges plus transition labels."""
+        result = self.model.inference(frames, mode=self.mode, overlap=self.overlap)
+        if self.mode == "clean_shot":
+            ranges, intra_labels, inter_labels = result, [], []
+        else:
+            ranges, intra_labels, inter_labels = result
 
-        chunks: list[np.ndarray] = []
-        ptr = 0
-        with torch.no_grad():
-            while ptr + WINDOW <= len(padded):
-                window = padded[ptr : ptr + WINDOW][np.newaxis]  # (1,100,27,48,3)
-                single, _ = self.model(torch.from_numpy(window).to(self.device))
-                single = torch.sigmoid(single).cpu().numpy()
-                chunks.append(single[0, PAD : PAD + STRIDE, 0])
-                ptr += STRIDE
+        if not ranges:
+            # No boundary found: treat the whole input as a single shot.
+            return [[0, len(frames) - 1]], [], []
 
-        return np.concatenate(chunks)[:n]
-
-    def detect(self, frames: np.ndarray, threshold: float = 0.5) -> list[list[int]]:
-        """Return [start, end] (inclusive) shot ranges over the frames."""
-        return predictions_to_scenes(self.predict(frames), threshold)
+        return [[int(s), int(e)] for s, e in ranges], intra_labels, inter_labels
