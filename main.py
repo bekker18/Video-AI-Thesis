@@ -1,7 +1,7 @@
 import argparse
 from pathlib import Path
 
-from src.sampling.decoder import decode
+from src.sampling.sampler import decode
 from src.segmentation.download import download_models
 
 RAW_DIR = Path("data/raw")

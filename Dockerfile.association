@@ -10,24 +10,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# OmniShotCut builds a torchvision ResNet-18 with pretrained=True. Keep that
-# cache alongside the other segmentation weights so it survives restarts.
-ENV TORCH_HOME=/app/models/segmentation
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     for i in 1 2 3 4 5 6 7 8; do \
     pip install --timeout 60 torch torchvision && exit 0; \
     echo "torch install attempt $i stalled, retrying from cache"; \
     done; exit 1
 
-COPY requirements-sampling.txt requirements-segmentation.txt ./
+COPY requirements-sampling.txt requirements-association.txt ./
 RUN --mount=type=cache,target=/root/.cache/pip \
     for i in 1 2 3 4 5; do \
     pip install --timeout 60 \
-    -r requirements-sampling.txt -r requirements-segmentation.txt && exit 0; \
+    -r requirements-sampling.txt -r requirements-association.txt && exit 0; \
     echo "requirements install attempt $i stalled, retrying from cache"; \
     done; exit 1
 
 COPY . .
 
-ENTRYPOINT ["python", "-m", "src.segmentation"]
+ENTRYPOINT ["python", "-m", "src.association"]

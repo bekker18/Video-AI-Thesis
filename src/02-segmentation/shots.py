@@ -89,4 +89,4 @@ class ShotDetector:
             # No boundary found: treat the whole input as a single shot.
             return [[0, len(frames) - 1]], [], []
 
-        return [[int(s), int(e)] for s, e in ranges], intra_labels, inter_labels
+        return [[int(s), int(e) - 1] for s, e in ranges], intra_labels, inter_labels

@@ -12,4 +12,4 @@ RUN pip install --no-cache-dir -r requirements-sampling.txt
 
 COPY . .
 
-CMD ["python", "-m", "pytest", "tests/sampling-test.py", "tests/segmentation-test.py", "-v"]
+ENTRYPOINT ["python", "main.py"]
