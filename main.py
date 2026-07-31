@@ -2,7 +2,6 @@ import argparse
 from pathlib import Path
 
 from src.sampling.sampler import decode
-from src.segmentation.download import download_models
 
 RAW_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
@@ -16,7 +15,6 @@ def ensure_data_dirs() -> None:
 
 def main() -> None:
     ensure_data_dirs()
-    download_models()
 
     parser = argparse.ArgumentParser(
         description="Decode a video into frames using OpenCV."
