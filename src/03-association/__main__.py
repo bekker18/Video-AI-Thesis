@@ -5,10 +5,19 @@ from pathlib import Path
 
 from .identities import (
     DEFAULT_CONTAINMENT,
+    DEFAULT_FACE_SIMILARITY,
+    DEFAULT_MIN_DETECTIONS,
+    DEFAULT_MIN_TRACK_SCORE,
     DEFAULT_MIN_VOTES,
     DEFAULT_REID_SIMILARITY,
 )
-from .detect import DEFAULT_CONF, DEFAULT_IMGSZ, STREAMS
+from .detect import (
+    DEFAULT_CONF,
+    DEFAULT_IMGSZ,
+    DEFAULT_NMS_IOU,
+    DEFAULT_OBJECT_CONF,
+    STREAMS,
+)
 from .download import download_models
 from .pipeline import (
     DEFAULT_BUFFER_FRAMES,
@@ -16,7 +25,7 @@ from .pipeline import (
     DEFAULT_FACE_WEIGHTS,
     track,
 )
-from .trackers import PROFILES
+from .trackers import DEFAULT_REID_WEIGHTS, PROFILES
 from .visualize import visualize
 
 
@@ -98,7 +107,43 @@ def main() -> None:
         "--reid-similarity",
         type=float,
         default=DEFAULT_REID_SIMILARITY,
-        help="Cosine similarity to merge person identities across shots.",
+        help="Body cosine similarity to merge person identities across shots.",
+    )
+    parser.add_argument(
+        "--face-similarity",
+        type=float,
+        default=DEFAULT_FACE_SIMILARITY,
+        help="Face cosine similarity to merge person identities across shots.",
+    )
+    parser.add_argument(
+        "--reid-weights",
+        type=Path,
+        default=DEFAULT_REID_WEIGHTS,
+        help="Appearance encoder used to link identities across shots.",
+    )
+    parser.add_argument(
+        "--nms-iou",
+        type=float,
+        default=DEFAULT_NMS_IOU,
+        help="IoU above which two boxes are the same thing detected twice.",
+    )
+    parser.add_argument(
+        "--object-conf",
+        type=float,
+        default=DEFAULT_OBJECT_CONF,
+        help="Confidence floor for the object stream, stricter than --conf.",
+    )
+    parser.add_argument(
+        "--min-detections",
+        type=int,
+        default=DEFAULT_MIN_DETECTIONS,
+        help="Detected frames a track needs before it becomes an identity.",
+    )
+    parser.add_argument(
+        "--min-track-score",
+        type=float,
+        default=DEFAULT_MIN_TRACK_SCORE,
+        help="Mean score a track needs before it becomes an identity.",
     )
     parser.add_argument(
         "--no-link-shots",
@@ -196,10 +241,16 @@ def main() -> None:
         containment=args.containment,
         min_votes=args.min_votes,
         reid_similarity=args.reid_similarity,
+        face_similarity=args.face_similarity,
+        reid_weights=args.reid_weights,
+        min_detections=args.min_detections,
+        min_track_score=args.min_track_score,
         link_shots=not args.no_link_shots,
         detect_objects=not args.no_objects,
         imgsz=args.imgsz,
         conf=args.conf,
+        nms_iou=args.nms_iou,
+        object_conf=args.object_conf,
         device=args.device,
     )
 

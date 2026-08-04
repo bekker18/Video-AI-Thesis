@@ -1,0 +1,1 @@
+Average from a temporal point of view, average from embeddings.

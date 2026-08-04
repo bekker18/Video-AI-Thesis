@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import inspect
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,8 +19,8 @@ from .detect import Detection
 
 # Profiles from the architecture: the affordable path runs ByteTrack (motion only), the offline path runs BoT-SORT with ReID appearance features.
 PROFILES = ("affordable", "offline")
+DEFAULT_REID_WEIGHTS = Path("models/association/yolo11n.pt")
 
-# ByteTrack/BoT-SORT defaults, matching ultralytics' shipped bytetrack.yaml and botsort.yaml. track_buffer is overridden per run (see TrackerConfig.build).
 _DEFAULTS = {
     "track_high_thresh": 0.25,
     "track_low_thresh": 0.1,
@@ -100,7 +101,7 @@ class TrackerConfig:
     detect_every: int = 2
     # How long a track survives unmatched, in source frames.
     buffer_frames: int = 30
-    reid_model: str = "auto"
+    reid_weights: Path = DEFAULT_REID_WEIGHTS
     device: str = "cpu"
 
     def build(self) -> SimpleNamespace:
@@ -117,8 +118,15 @@ class TrackerConfig:
         )
         args.device = self.device
         if self.profile == "offline":
+            weights = Path(self.reid_weights)
+            if not weights.exists():
+                raise FileNotFoundError(
+                    f"ReID weights not found: {weights}\n"
+                    "The offline profile links identities across shots by "
+                    "appearance and cannot run without them."
+                )
             args.with_reid = True
-            args.model = self.reid_model
+            args.model = str(weights)
         return args
 
 
@@ -161,13 +169,22 @@ class StreamTracker:
         self.config = config
         self.class_names = class_names or {}
         self._tracker = _build_tracker(config)
-        # Last ReID embedding seen per track id, used for cross-shot linking.
-        self.embeddings: dict[int, np.ndarray] = {}
+        self._feature_sums: dict[int, np.ndarray] = {}
+
+    @property
+    def embeddings(self) -> dict[int, np.ndarray]:
+        """Time-averaged ReID feature per track id, used for cross-shot linking."""
+        averaged: dict[int, np.ndarray] = {}
+        for track_id, total in self._feature_sums.items():
+            norm = float(np.linalg.norm(total))
+            if norm > 0:
+                averaged[track_id] = (total / norm).astype(np.float32)
+        return averaged
 
     def reset(self) -> None:
         """Clear all state at a shot boundary."""
         self._tracker.reset()
-        self.embeddings.clear()
+        self._feature_sums.clear()
 
     def update(
         self, detections: list[Detection], image: np.ndarray
@@ -225,12 +242,23 @@ class StreamTracker:
         return boxes
 
     def _harvest_embeddings(self) -> None:
-        """Cache BoT-SORT's smoothed ReID feature for each live track."""
+        """Accumulate this frame's ReID feature for each live track."""
         if self.config.profile != "offline":
             return
         for track in self._tracker.tracked_stracks:
-            feat = getattr(track, "smooth_feat", None)
-            if feat is not None:
-                self.embeddings[int(track.track_id)] = np.asarray(
-                    feat, dtype=np.float32
-                )
+            feat = getattr(track, "curr_feat", None)
+            if feat is None:
+                continue
+            vector = np.asarray(feat, dtype=np.float32).reshape(-1)
+            norm = float(np.linalg.norm(vector))
+            if norm == 0:
+                continue
+            # Weight by detection confidence so a blurred or half-occluded
+            # frame contributes less to the track's description than a clean one.
+            weight = float(getattr(track, "score", 1.0))
+            track_id = int(track.track_id)
+            contribution = (vector / norm) * weight
+            if track_id in self._feature_sums:
+                self._feature_sums[track_id] += contribution
+            else:
+                self._feature_sums[track_id] = contribution

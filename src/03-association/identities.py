@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from itertools import combinations
 
 import numpy as np
 
@@ -13,6 +14,15 @@ DEFAULT_CONTAINMENT = 0.6
 DEFAULT_MIN_VOTES = 3
 # Cosine similarity above which two body tracks in different shots are the same person.
 DEFAULT_REID_SIMILARITY = 0.65
+# The same, for face tracks. Stricter than the body threshold: the encoder is a general-purpose backbone rather than a face recognition model, so its face
+# embeddings are usable but noisier, and two different faces framed alike are more similar to each other than two different bodies are.
+DEFAULT_FACE_SIMILARITY = 0.7
+# Streams that carry appearance worth comparing across a cut. Objects are left out: "the same chair in two shots" is not an identity claim this stage makes.
+LINKED_STREAMS = ("face", "body")
+
+# Evidence a track needs before it is allowed to become an identity. A handful of low-confidence frames is what a detector artifact looks like, and promoting one invents a person who was never there.
+DEFAULT_MIN_DETECTIONS = 3
+DEFAULT_MIN_TRACK_SCORE = 0.3
 
 
 @dataclass
@@ -93,63 +103,133 @@ def bind_faces_to_bodies(
     return binding
 
 
-class _UnionFind:
-    """Merges identities that turn out to be the same person across shots."""
+def is_supported(
+    track: Track,
+    min_detections: int = DEFAULT_MIN_DETECTIONS,
+    min_score: float = DEFAULT_MIN_TRACK_SCORE,
+) -> bool:
+    """Whether a track carries enough evidence to stand for something real."""
+    return track.num_detected >= min_detections and track.mean_score >= min_score
 
-    def __init__(self) -> None:
-        self._parent: dict[str, str] = {}
 
-    def find(self, item: str) -> str:
-        self._parent.setdefault(item, item)
-        while self._parent[item] != item:
-            self._parent[item] = self._parent[self._parent[item]]
-            item = self._parent[item]
-        return item
+def cannot_link_pairs(
+    records: list[dict],
+    tracks_by_key: dict[str, Track],
+) -> set[tuple[str, str]]:
+    """Identity pairs that were visible in the same frame."""
+    per_frame: defaultdict[int, set[str]] = defaultdict(set)
+    for record in records:
+        identity_id = tracks_by_key[record["track_key"]].identity_id
+        if identity_id and identity_id.startswith("person"):
+            per_frame[record["frame_index"]].add(identity_id)
 
-    def union(self, a: str, b: str) -> None:
-        root_a, root_b = self.find(a), self.find(b)
-        if root_a != root_b:
-            # Keep the earlier identity as the representative so ids stay ordered by first appearance.
-            first, second = sorted((root_a, root_b))
-            self._parent[second] = first
+    pairs: set[tuple[str, str]] = set()
+    for present in per_frame.values():
+        pairs.update(combinations(sorted(present), 2))
+    return pairs
+
+
+def _identity_embeddings(
+    identities: dict[str, Identity],
+    tracks: list[Track],
+) -> dict[str, dict[str, np.ndarray]]:
+    """One averaged embedding per person identity per stream."""
+    by_key = {t.key: t for t in tracks}
+    result: dict[str, dict[str, np.ndarray]] = {}
+
+    for identity in identities.values():
+        if identity.kind != "person":
+            continue
+        per_stream: dict[str, np.ndarray] = {}
+        for stream in LINKED_STREAMS:
+            vectors, weights = [], []
+            for key in getattr(identity, f"{stream}_tracks"):
+                track = by_key.get(key)
+                if track is None or track.embedding is None:
+                    continue
+                vectors.append(
+                    np.asarray(track.embedding, dtype=np.float32).reshape(-1)
+                )
+                weights.append(float(max(track.num_detected, 1)))
+            if not vectors:
+                continue
+            weighted = np.array(weights, dtype=np.float32)[:, None]
+            total = (np.stack(vectors) * weighted).sum(0)
+            norm = float(np.linalg.norm(total))
+            if norm > 0:
+                per_stream[stream] = total / norm
+        if per_stream:
+            result[identity.identity_id] = per_stream
+    return result
+
+
+def _link_margin(
+    group_a: set[str],
+    group_b: set[str],
+    embeddings: dict[str, dict[str, np.ndarray]],
+    thresholds: dict[str, float],
+) -> float | None:
+    """How far the best-agreeing stream clears its threshold, or None."""
+    best: float | None = None
+    for stream, threshold in thresholds.items():
+        sims = [
+            float(embeddings[a][stream] @ embeddings[b][stream])
+            for a in group_a
+            for b in group_b
+            if stream in embeddings[a] and stream in embeddings[b]
+        ]
+        if not sims:
+            continue
+        margin = sum(sims) / len(sims) - threshold
+        if best is None or margin > best:
+            best = margin
+    return best
 
 
 def link_across_shots(
+    identities: dict[str, Identity],
     tracks: list[Track],
+    cannot_link: set[tuple[str, str]] | None = None,
     similarity: float = DEFAULT_REID_SIMILARITY,
+    face_similarity: float = DEFAULT_FACE_SIMILARITY,
 ) -> dict[str, str]:
-    """Merge person identities across shots using body ReID embeddings.
-
-    Returns a mapping from identity id to its merged representative. Only body
-    tracks are compared: the ReID encoder is trained on whole people, so its
-    features are meaningful for bodies and not for face crops or objects.
-    """
-    candidates = [
-        t
-        for t in tracks
-        if t.stream == "body" and t.embedding is not None and t.identity_id
-    ]
-    if len(candidates) < 2:
+    """Cluster person identities that appearance says are the same person."""
+    embeddings = _identity_embeddings(identities, tracks)
+    if len(embeddings) < 2:
         return {}
 
-    matrix = np.stack([t.embedding for t in candidates]).astype(np.float32)
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    sims = (matrix / norms) @ (matrix / norms).T
+    thresholds = {"body": similarity, "face": face_similarity}
+    cannot_link = cannot_link or set()
 
-    union = _UnionFind()
-    for i in range(len(candidates)):
-        for j in range(i + 1, len(candidates)):
-            # Same shot means the tracker already decided these are different people; only bridge across a cut.
-            if candidates[i].shot_id == candidates[j].shot_id:
+    # Representative -> members. Reps are the lowest id in the cluster, and ids are numbered by first appearance, which is the ordering merge_identities
+    # relies on to build a representative before anything folds into it.
+    clusters: dict[str, set[str]] = {i: {i} for i in embeddings}
+    blocked: dict[str, set[str]] = {
+        i: {b for a, b in cannot_link if a == i} | {a for a, b in cannot_link if b == i}
+        for i in embeddings
+    }
+
+    while len(clusters) > 1:
+        best: tuple[float, str, str] | None = None
+        for a, b in combinations(sorted(clusters), 2):
+            if clusters[b] & blocked[a]:
                 continue
-            if sims[i, j] >= similarity:
-                union.union(candidates[i].identity_id, candidates[j].identity_id)
+            margin = _link_margin(clusters[a], clusters[b], embeddings, thresholds)
+            if margin is not None and (best is None or margin > best[0]):
+                best = (margin, a, b)
+        if best is None or best[0] < 0:
+            break
+
+        _, keep, absorb = best
+        clusters[keep] |= clusters[absorb]
+        blocked[keep] |= blocked[absorb]
+        del clusters[absorb], blocked[absorb]
 
     return {
-        t.identity_id: union.find(t.identity_id)
-        for t in candidates
-        if union.find(t.identity_id) != t.identity_id
+        member: rep
+        for rep, members in clusters.items()
+        for member in members
+        if member != rep
     }
 
 
@@ -242,6 +322,37 @@ def merge_identities(
             track.identity_id = merges[track.identity_id]
 
     return merged
+
+
+def renumber_identities(
+    identities: dict[str, Identity],
+    tracks: list[Track],
+) -> dict[str, Identity]:
+    """Renumber ids contiguously by first appearance.
+
+    Merging folds identities into their representative and leaves the absorbed
+    numbers unused, so a clip can end up reporting person_0001 and person_0005
+    and nothing between. Reading the manifest should not raise the question of
+    where the missing three went.
+    """
+    mapping: dict[str, str] = {}
+    renumbered: dict[str, Identity] = {}
+    counters = {"person": 0, "object": 0}
+
+    for identity in sorted(
+        identities.values(), key=lambda i: (i.start_frame, i.identity_id)
+    ):
+        counters[identity.kind] += 1
+        new_id = f"{identity.kind}_{counters[identity.kind]:04d}"
+        mapping[identity.identity_id] = new_id
+        identity.identity_id = new_id
+        renumbered[new_id] = identity
+
+    for track in tracks:
+        if track.identity_id in mapping:
+            track.identity_id = mapping[track.identity_id]
+
+    return renumbered
 
 
 def count_people(

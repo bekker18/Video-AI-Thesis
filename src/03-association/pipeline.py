@@ -14,20 +14,33 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
+from .detect import (
+    DEFAULT_CONF,
+    DEFAULT_IMGSZ,
+    DEFAULT_NMS_IOU,
+    DEFAULT_OBJECT_CONF,
+    STREAMS,
+    MultiStreamDetector,
+)
 from .identities import (
     DEFAULT_CONTAINMENT,
+    DEFAULT_FACE_SIMILARITY,
+    DEFAULT_MIN_DETECTIONS,
+    DEFAULT_MIN_TRACK_SCORE,
     DEFAULT_MIN_VOTES,
     DEFAULT_REID_SIMILARITY,
     Track,
     assign_identities,
     bind_faces_to_bodies,
+    cannot_link_pairs,
     collect_votes,
     count_people,
+    is_supported,
     link_across_shots,
     merge_identities,
+    renumber_identities,
 )
-from .detect import DEFAULT_CONF, DEFAULT_IMGSZ, STREAMS, MultiStreamDetector
-from .trackers import StreamTracker, TrackerConfig
+from .trackers import DEFAULT_REID_WEIGHTS, StreamTracker, TrackerConfig
 
 # All model weights live locally under models/association/ and are loaded offline.
 DEFAULT_FACE_WEIGHTS = Path("models/association/yolov11n-face.pt")
@@ -75,10 +88,16 @@ def track(
     containment: float = DEFAULT_CONTAINMENT,
     min_votes: int = DEFAULT_MIN_VOTES,
     reid_similarity: float = DEFAULT_REID_SIMILARITY,
+    face_similarity: float = DEFAULT_FACE_SIMILARITY,
+    reid_weights: Path = DEFAULT_REID_WEIGHTS,
+    min_detections: int = DEFAULT_MIN_DETECTIONS,
+    min_track_score: float = DEFAULT_MIN_TRACK_SCORE,
     link_shots: bool = True,
     detect_objects: bool = True,
     imgsz: int = DEFAULT_IMGSZ,
     conf: float = DEFAULT_CONF,
+    nms_iou: float = DEFAULT_NMS_IOU,
+    object_conf: float = DEFAULT_OBJECT_CONF,
     device: str = "cpu",
 ) -> dict:
     """Detect, track and associate identities over the sampled frames."""
@@ -119,11 +138,14 @@ def track(
         imgsz=imgsz,
         conf=conf,
         detect_objects=detect_objects,
+        nms_iou=nms_iou,
+        object_conf=object_conf,
     )
     config = TrackerConfig(
         profile=profile,
         detect_every=detect_every,
         buffer_frames=buffer_frames,
+        reid_weights=reid_weights,
         device=device,
     )
     class_names = detector.general_model.names
@@ -213,19 +235,50 @@ def track(
             )
 
         # Appearance features are only available once a shot has been tracked.
+        harvested = 0
         for stream, tracker in trackers.items():
             for track_id, embedding in tracker.embeddings.items():
                 entry = tracks.get(_track_key(shot_id, stream, track_id))
                 if entry is not None:
                     entry.embedding = embedding
+                    harvested += 1
 
-    track_list = list(tracks.values())
+        if profile == "offline" and shot_id == 0 and harvested == 0:
+            raise RuntimeError(
+                "The offline profile tracked a shot without producing any ReID "
+                f"embeddings (checked {reid_weights}). Cross-shot identity "
+                "linking cannot run."
+            )
+
+    # Drop tracks too weak to stand for anything before they are given an identity, along with the records and face-body votes that reference them.
+    track_list = [
+        t
+        for t in tracks.values()
+        if is_supported(t, min_detections=min_detections, min_score=min_track_score)
+    ]
+    kept = {t.key for t in track_list}
+    tracks = {key: entry for key, entry in tracks.items() if key in kept}
+    records = [r for r in records if r["track_key"] in kept]
+    votes = {
+        pair: count
+        for pair, count in votes.items()
+        if pair[0] in kept and pair[1] in kept
+    }
+
     bindings = bind_faces_to_bodies(dict(votes), min_votes=min_votes)
     identities = assign_identities(track_list, bindings)
 
     if link_shots and profile == "offline":
-        merges = link_across_shots(track_list, similarity=reid_similarity)
+        merges = link_across_shots(
+            identities,
+            track_list,
+            cannot_link_pairs(records, tracks),
+            similarity=reid_similarity,
+            face_similarity=face_similarity,
+        )
         identities = merge_identities(identities, track_list, merges)
+
+    identities = renumber_identities(identities, track_list)
 
     manifest = _build_manifest(
         frames_dir=frames_dir,
@@ -241,6 +294,7 @@ def track(
         num_detection_frames=num_detection_frames,
         detector=detector,
         general_arch=general_arch,
+        reid_weights=reid_weights if profile == "offline" else None,
     )
 
     (output_dir / "tracks.json").write_text(json.dumps(manifest, indent=2))
@@ -270,6 +324,7 @@ def _build_manifest(
     num_detection_frames: int,
     detector: MultiStreamDetector,
     general_arch: str,
+    reid_weights: Path | None,
 ) -> dict:
     by_key = {t.key: t for t in tracks}
 
@@ -315,6 +370,7 @@ def _build_manifest(
         "profile": profile,
         "tracker": "BoT-SORT-ReID" if profile == "offline" else "ByteTrack",
         "detector": {**detector.weights, "general_arch": general_arch},
+        "reid_model": str(reid_weights) if reid_weights else None,
         "detect_every": detect_every,
         "num_detection_frames": num_detection_frames,
         "boxes_file": "tracks.jsonl",

@@ -18,6 +18,12 @@ PERSON_CLASS_ID = 0
 # Low enough to keep ByteTrack's low-score boxes; the tracker applies the real thresholds itself (see trackers.TrackerConfig).
 DEFAULT_CONF = 0.1
 DEFAULT_IMGSZ = 640
+# IoU above which two boxes are treated as the same thing detected twice.
+# Deliberately high: real subjects standing close overlap far less than this, while duplicates of one subject overlap almost completely.
+DEFAULT_NMS_IOU = 0.7
+# Objects are held to a stricter floor than bodies. DEFAULT_CONF exists to feed ByteTrack's low-score association pass on the person stream; nothing in the
+# object stream benefits from it, and at 0.1 a single confused frame is enough to open a spurious track.
+DEFAULT_OBJECT_CONF = 0.3
 
 STREAMS = ("face", "body", "object")
 
@@ -42,6 +48,37 @@ class FrameDetections:
 
     def stream(self, name: str) -> list[Detection]:
         return getattr(self, name)
+
+
+def iou(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Intersection over union of two xyxy boxes."""
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    overlap = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if overlap <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - overlap
+    return overlap / union if union > 0 else 0.0
+
+
+def suppress_duplicates(
+    detections: list[Detection],
+    iou_threshold: float = DEFAULT_NMS_IOU,
+) -> list[Detection]:
+    """Class-agnostic non-maximum suppression over one frame's detections.
+
+    RT-DETR is NMS-free by design, so nothing upstream removes near-identical
+    boxes, and at DEFAULT_CONF the weak tail of its output is kept on purpose.
+    The result is one subject reported two or three times, which the tracker
+    faithfully turns into two or three identities.
+    """
+    kept: list[Detection] = []
+    for detection in sorted(detections, key=lambda d: -d.score):
+        if all(iou(detection.xyxy, k.xyxy) < iou_threshold for k in kept):
+            kept.append(detection)
+    return kept
 
 
 class _Model:
@@ -112,6 +149,8 @@ class MultiStreamDetector:
         imgsz: int = DEFAULT_IMGSZ,
         conf: float = DEFAULT_CONF,
         detect_objects: bool = True,
+        nms_iou: float = DEFAULT_NMS_IOU,
+        object_conf: float = DEFAULT_OBJECT_CONF,
     ) -> None:
         self.face_model = _Model(
             face_weights, arch="yolo", device=device, imgsz=imgsz, conf=conf
@@ -120,6 +159,8 @@ class MultiStreamDetector:
             general_weights, arch=general_arch, device=device, imgsz=imgsz, conf=conf
         )
         self.detect_objects = detect_objects
+        self.nms_iou = nms_iou
+        self.object_conf = object_conf
 
     @property
     def weights(self) -> dict[str, str]:
@@ -131,14 +172,18 @@ class MultiStreamDetector:
     def detect(self, image: np.ndarray) -> FrameDetections:
         # Face checkpoints are single-class; relabel so the stream is readable
         # regardless of how the checkpoint names its class.
-        faces = [Detection(d.xyxy, d.score, 0, "face") for d in self.face_model(image)]
+        faces = [
+            Detection(d.xyxy, d.score, 0, "face")
+            for d in suppress_duplicates(self.face_model(image), self.nms_iou)
+        ]
 
+        # Deduplicate before the split, not after: a duplicate only loses to the box that outscored it if the two are still in the same list.
         bodies: list[Detection] = []
         objects: list[Detection] = []
-        for det in self.general_model(image):
+        for det in suppress_duplicates(self.general_model(image), self.nms_iou):
             if det.class_id == PERSON_CLASS_ID:
                 bodies.append(det)
-            elif self.detect_objects:
+            elif self.detect_objects and det.score >= self.object_conf:
                 objects.append(det)
 
         return FrameDetections(face=faces, body=bodies, object=objects)

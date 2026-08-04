@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.sampling
-    image: video-ai-thesis
+    image: video-ai-thesis-sampling
     volumes:
       - ./data:/app/data
       - ./models:/app/models
@@ -21,8 +21,6 @@ services:
       - ./models:/app/models
       - ./src:/app/src
     environment:
-      # torch.hub cache for OmniShotCut's pretrained ResNet-18 backbone; lives on
-      # the mounted models/ volume so it is downloaded once, not every run.
       TORCH_HOME: /app/models/segmentation
     entrypoint: ["python", "-m", "src.segmentation"]
     deploy:
