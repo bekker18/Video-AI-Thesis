@@ -6,11 +6,6 @@ Build the image:
 docker compose build
 ```
 
-Stage directories are numbered so the pipeline order is visible on disk, and
-imported by their plain name: `src/03-association/` is `python -m src.association`.
-The mapping lives in [src/__init__.py](src/__init__.py); a stage becomes
-importable once its directory has an `__init__.py`.
-
 Pass a full path to decode a video into frames (output to `data/processed/<video>/frame/`):
 
 ```bash
@@ -79,6 +74,3 @@ of people in that frame.
 | `--visualize-scores`      | Label each box with its confidence.                 |
 | `--hide-predicted`        | Detected boxes only.                                |
 | `--save-annotated-frames` | Also write the annotated frames as images.          |
-
-Playback rate defaults to the source clip's rate divided by the decode `--step`,
-read from `data/raw/clips/<video>.*`; without that clip it falls back to 25 fps.

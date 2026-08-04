@@ -3,14 +3,6 @@
 import argparse
 from pathlib import Path
 
-from .identities import (
-    DEFAULT_CONTAINMENT,
-    DEFAULT_FACE_SIMILARITY,
-    DEFAULT_MIN_DETECTIONS,
-    DEFAULT_MIN_TRACK_SCORE,
-    DEFAULT_MIN_VOTES,
-    DEFAULT_REID_SIMILARITY,
-)
 from .detect import (
     DEFAULT_CONF,
     DEFAULT_IMGSZ,
@@ -19,6 +11,14 @@ from .detect import (
     STREAMS,
 )
 from .download import download_models
+from .identities import (
+    DEFAULT_CONTAINMENT,
+    DEFAULT_FACE_SIMILARITY,
+    DEFAULT_MIN_DETECTIONS,
+    DEFAULT_MIN_TRACK_SCORE,
+    DEFAULT_MIN_VOTES,
+    DEFAULT_REID_SIMILARITY,
+)
 from .pipeline import (
     DEFAULT_BUFFER_FRAMES,
     DEFAULT_DETECT_EVERY,
