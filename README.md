@@ -1,76 +1,51 @@
-# Video-AI-Thesis
+# Video AI Thesis
 
-Build the image:
+A modular video processing pipeline. See [STATE.md](STATE.md) for how it works and
+[HISTORY.md](HISTORY.md) for how it got here.
+
+## Build
 
 ```bash
 docker compose build
 ```
 
-Pass a full path to decode a video into frames (output to `data/processed/<video>/frame/`):
+## Run
 
 ```bash
-docker compose run --rm sample data/raw/clips/example.mp4
+# whole pipeline
+docker compose run --rm pipeline data/raw/messi.mp4
+
+# one module on its own
+docker compose run --rm pipeline data/raw/messi.mp4 --stages 02-segmentation
 ```
 
-Segment sampled frames into shots + keyframes with OmniShotCut and MobileCLIP
-(output to `data/processed/<video>/segmentation/`). Requires an NVIDIA GPU:
+Output lands in `data/processed/<video_name>/`.
+
+## Options
+
+| flag | default | meaning |
+| --- | --- | --- |
+| `--stages <name> ...` | all | run a subset, always in pipeline order |
+| `--device cpu\|cuda\|auto` | `auto` | where models run |
+| `--fps 5` | every frame | sample rate for 01-sampling |
+| `--width 640` | source | resize frames, keeping aspect ratio |
+| `--quality 95` | `95` | jpeg quality, 0 (worst) to 100 (best) |
+| `--image-format png` | `jpg` | frame file format |
+| `--keyframes 3` | `3` | representative frames kept per shot |
+| `--shot-mode clean_shot` | `default` | `clean_shot` drops transitions, keeping only cuts |
+| `--shot-overlap 30` | `30` | frames shared between adjacent detection windows |
+
+## Download model weights
+
+Runs automatically before each stage; anything already in `models/` is reused.
+To prefetch everything up front:
 
 ```bash
-docker compose run --rm segment data/processed/example/frames
+docker compose run --rm --entrypoint python3 pipeline download_models.py
 ```
 
-Use `--mode default` to also label transitions (dissolve, wipe, fade) instead of
-keeping general cuts only.
-
-Track faces, bodies and objects and associate them into stable identity ids
-(output to `data/processed/<video>/association/`):
+## Type check
 
 ```bash
-docker compose run --rm associate data/processed/example/frames
+docker compose run --rm --entrypoint mypy pipeline
 ```
-
-Detection runs every second frame (`--detect-every`), tracking on every frame:
-in between detections the Kalman motion model carries each box forward. Two
-profiles are available:
-
-| `--profile`            | detector            | tracker       |
-| ------------------------ | ------------------- | ------------- |
-| `affordable` (default) | YOLO11 + YOLO-face  | ByteTrack     |
-| `offline`              | RT-DETR + YOLO-face | BoT-SORT-ReID |
-
-Trackers reset at every shot boundary from `segments.json`, since a cut breaks
-motion continuity. The `offline` profile re-links people across those
-boundaries using ReID embeddings; `affordable` keeps identities shot-local.
-
-Outputs:
-
-- `tracks.json` — shots with a per-shot headcount (`num_people`,
-  `max_people_in_frame`), the identity list, and every track's lifetime.
-- `tracks.jsonl` — one record per box per frame, each stamped with its
-  `identity_id` and whether the box was `detected` or `predicted`.
-
-Faces and bodies are bound into a single `person_*` identity by containment
-voting over each shot, so a person seen through both streams is counted once
-and fusion has one key to bind its outputs to. Objects get `object_*` ids.
-
-## Visualizing the tracks
-
-Add `--visualize` to the association run, or render from a finished run without
-tracking again (output to `data/processed/<video>/visualization/tracks.mp4`):
-
-```bash
-docker compose run --rm associate data/processed/example/frames --visualize-only
-```
-
-Boxes are coloured by identity rather than by track, so a face and the body it
-was bound to share a colour; frames carried by the motion model between
-detections are drawn dashed. The overlay reads `frame`, `shot` and the number
-of people in that frame.
-
-| flag                        | effect                                              |
-| --------------------------- | --------------------------------------------------- |
-| `--visualize-streams`     | Comma-separated streams to draw, e.g.`face,body`. |
-| `--visualize-fps`         | Playback rate override.                             |
-| `--visualize-scores`      | Label each box with its confidence.                 |
-| `--hide-predicted`        | Detected boxes only.                                |
-| `--save-annotated-frames` | Also write the annotated frames as images.          |

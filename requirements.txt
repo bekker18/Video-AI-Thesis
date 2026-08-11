@@ -1,0 +1,28 @@
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+torch==2.5.1
+torchvision==0.20.1
+numpy==1.26.4
+pillow==11.0.0
+huggingface_hub==1.26.0
+
+# 02-segmentation
+open_clip_torch==2.30.0
+opencv-python-headless==4.10.0.84
+ffmpeg-python==0.2.0  # imported by omnishotcut at load time
+
+# 03-profiler. ultralytics itself is installed --no-deps in the Dockerfile, because it
+# requires opencv-python (the GUI build) which would shadow opencv-python-headless and
+# needs libGL. These are the rest of its dependencies, left unpinned to stay resolvable.
+matplotlib
+pandas
+psutil
+py-cpuinfo
+pyyaml
+requests
+scipy
+seaborn
+tqdm
+ultralytics-thop
+
+mypy==1.11.2

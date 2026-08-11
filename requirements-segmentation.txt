@@ -1,4 +1,0 @@
-omnishotcut @ git+https://github.com/UVA-Computer-Vision-Lab/OmniShotCut.git
-open-clip-torch
-timm
-pillow

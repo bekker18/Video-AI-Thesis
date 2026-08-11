@@ -1,0 +1,9 @@
+[tool.mypy]
+python_version = "3.10"
+strict = true
+files = ["main.py", "config.py", "download_models.py", "src"]
+mypy_path = "."
+
+[[tool.mypy.overrides]]
+module = ["omnishotcut.*", "open_clip.*", "ultralytics.*"]
+ignore_missing_imports = true

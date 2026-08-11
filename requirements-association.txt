@@ -1,4 +1,0 @@
-# Pinned to the 8.4 line: the tracker classes used in src/03-association/trackers.py
-# are internal API and their shape changes between minor releases.
-ultralytics>=8.4,<8.5
-lap

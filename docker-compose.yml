@@ -1,50 +1,13 @@
 services:
-  sample:
-    build:
-      context: .
-      dockerfile: Dockerfile.sampling
-    image: video-ai-thesis-sampling
+  pipeline:
+    build: .
+    image: video-ai-thesis
     volumes:
       - ./data:/app/data
       - ./models:/app/models
-      - ./src:/app/src
       - ./main.py:/app/main.py
-    entrypoint: ["python", "main.py"]
-
-  segment:
-    build:
-      context: .
-      dockerfile: Dockerfile.segmentation
-    image: video-ai-thesis-segmentation
-    volumes:
-      - ./data:/app/data
-      - ./models:/app/models
+      - ./config.py:/app/config.py
+      - ./download_models.py:/app/download_models.py
+      - ./pyproject.toml:/app/pyproject.toml
       - ./src:/app/src
-    environment:
-      TORCH_HOME: /app/models/segmentation
-    entrypoint: ["python", "-m", "src.segmentation"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
-  associate:
-    build:
-      context: .
-      dockerfile: Dockerfile.association
-    image: video-ai-thesis-association
-    volumes:
-      - ./data:/app/data
-      - ./models:/app/models
-      - ./src:/app/src
-    entrypoint: ["python", "-m", "src.association"]
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+    gpus: all
