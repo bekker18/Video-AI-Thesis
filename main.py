@@ -19,6 +19,7 @@ STAGES = [
     "01-sampling",
     "02-segmentation",
     "03-profiler",
+    "04-router",
 ]
 
 
@@ -42,6 +43,8 @@ def load_stage(name: str) -> Stage:
         sys.exit(f"cannot load stage: {path}")
 
     module: ModuleType = importlib.util.module_from_spec(spec)
+    # Registered before exec so dataclasses in the stage can resolve their annotations.
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -69,6 +72,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--face-conf", type=float, default=0.6)
     p.add_argument("--text-conf", type=float, default=0.5)
     p.add_argument("--scenes", type=int, default=3, help="scene labels kept per shot")
+
+    p.add_argument("--router-agreement", type=float, default=0.0,
+                   help="soft gate: fraction of a shot's keyframes a flag must hold in")
     return p.parse_args()
 
 
@@ -106,6 +112,7 @@ def main() -> None:
             face_conf=args.face_conf,
             text_conf=args.text_conf,
             scenes=args.scenes,
+            router_agreement=args.router_agreement,
         )
         download_models.ensure(name)
         print(f"[{name}] start")

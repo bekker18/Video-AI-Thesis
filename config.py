@@ -30,3 +30,6 @@ class Config:
     face_conf: float  # face detection confidence threshold
     text_conf: float  # text region confidence threshold
     scenes: int  # scene labels kept per shot
+
+    # 04-router
+    router_agreement: float  # soft gate: fraction of keyframes a flag must hold in; 0 = off
