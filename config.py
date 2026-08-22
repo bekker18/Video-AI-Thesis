@@ -33,3 +33,10 @@ class Config:
 
     # 04-router
     router_agreement: float  # soft gate: fraction of keyframes a flag must hold in; 0 = off
+
+    # 05-global-experts
+    map_size: int  # longest side of every dense map written
+    expert_batch: int  # keyframes per forward pass
+    seg_model: str  # segformer-b0 | segformer-b1 | segformer-b2
+    seg_top: int  # classes or segments kept per keyframe
+    tags: int  # zero-shot tags kept per keyframe

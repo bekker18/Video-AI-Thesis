@@ -3,8 +3,9 @@ presence flags 04-router branches on.
 
 One detector pass gives persons and objects. Faces are found only inside person boxes, so
 body presence and face presence stay distinct without a second full-frame inference. Text
-presence comes from PP-OCRv3's detection stage alone. Scene labels are zero-shot against
-the MobileCLIP embeddings 02 already computed.
+presence comes from PP-OCRv3's detection stage alone. Scene belongs to 05-global-experts,
+which runs a trained Places365 head; keeping a second answer here would only invite the
+two to disagree.
 """
 
 from __future__ import annotations
@@ -20,10 +21,8 @@ import download_models
 from config import Config
 
 STAGE = "03-profiler"
-CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"
 FACE_MODEL = "face_yunet.onnx"
 TEXT_MODEL = "text_ppocrv3.onnx"
-CATEGORIES = "categories_places365.txt"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
@@ -49,37 +48,6 @@ def _read_segmentation(out_root: Path) -> dict[str, Any]:
         raise RuntimeError(f"missing {path}; run 02-segmentation first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     return meta
-
-
-def _scene_labels(path: Path) -> list[str]:
-    """Places365 lines look like '/a/airfield 0' or '/b/baseball_field 12'."""
-    labels = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        name = line.split()[0].rsplit("/", 1)[-1]
-        labels.append(name.replace("_", " "))
-    return labels
-
-
-def _scene_vectors(labels: list[str], device: str, cache_dir: Path) -> Array:
-    """Text embeddings for the Places365 vocabulary, in MobileCLIP's shared space."""
-    import open_clip
-    import torch
-
-    model, _, _ = open_clip.create_model_and_transforms(CLIP_MODEL, cache_dir=str(cache_dir))
-    tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
-    model = model.to(device).eval()
-
-    prompts = [f"a photo of a {label}" for label in labels]
-    out: list[Array] = []
-    with torch.no_grad():
-        for i in range(0, len(prompts), 256):
-            tokens = tokenizer(prompts[i : i + 256]).to(device)
-            features = model.encode_text(tokens).float()
-            features /= features.norm(dim=-1, keepdim=True)
-            out.append(features.cpu().numpy())
-    return np.concatenate(out)
 
 
 def _detect(weights: Path, images: list[Array], conf: float, device: str) -> list[list[dict[str, Any]]]:
@@ -166,8 +134,7 @@ def _text(detector: Any, image: Array, conf: float) -> list[dict[str, Any]]:
     return regions
 
 
-def _summarise(keyframes: list[dict[str, Any]], labels: list[str],
-               scene_scores: Array, top: int) -> dict[str, Any]:
+def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
     """`flags` is the whole contract 04-router reads: four booleans, no class names. Class
     identity stays in `counts` as a diagnostic, because a false positive there is what makes
     a flag fire wrongly, and you cannot see that from the boolean alone."""
@@ -181,10 +148,6 @@ def _summarise(keyframes: list[dict[str, Any]], labels: list[str],
         for label, count in keyframe["object_counts"].items():
             classes[label] = max(classes.get(label, 0), count)
             seen[label] = seen.get(label, 0) + 1
-
-    mean = scene_scores.mean(axis=0)
-    order = np.argsort(-mean)[:top]
-    scenes = [{"label": labels[int(i)], "score": round(float(mean[i]), 4)} for i in order]
 
     text_hits = sum(1 for k in keyframes if k["text_count"])
     object_hits = sum(1 for k in keyframes if k["object_counts"])
@@ -209,7 +172,6 @@ def _summarise(keyframes: list[dict[str, Any]], labels: list[str],
             # Per class, so a one-frame false positive is distinguishable from a real object.
             "objects": {label: round(n / total, 3) for label, n in sorted(seen.items())},
         },
-        "scenes": scenes,
     }
 
 
@@ -225,11 +187,6 @@ def run(cfg: Config) -> dict[str, Any]:
     text_detector.setBinaryThreshold(0.3).setPolygonThreshold(cfg.text_conf)
     text_detector.setInputParams(1.0 / 255.0, TEXT_INPUT, TEXT_MEAN, True)
 
-    labels = _scene_labels(cfg.model_dir / CATEGORIES)
-    # Same MobileCLIP weights 02 already downloaded; no need for a second 380MB copy.
-    scene_vectors = _scene_vectors(labels, device, download_models.stage_dir("02-segmentation"))
-    embeddings: Array = np.load(cfg.out_root / "keyframe_embeddings.npy")
-
     # Every keyframe of every shot goes through the detector in one batch.
     paths: list[Path] = []
     owners: list[int] = []
@@ -243,7 +200,6 @@ def run(cfg: Config) -> dict[str, Any]:
         raise RuntimeError("some keyframes referenced by segmentation.json are missing")
     detections = _detect(weights, images, cfg.det_conf, device)
 
-    scene_scores = embeddings @ scene_vectors.T
     per_frame: list[dict[str, Any]] = []
     for i, (image, boxes) in enumerate(zip(images, detections)):
         persons = [b for b in boxes if b["label"] == PERSON]
@@ -272,7 +228,7 @@ def run(cfg: Config) -> dict[str, Any]:
         index = int(shot["index"])
         picked = [i for i, owner in enumerate(owners) if owner == index]
         keyframes = [per_frame[i] for i in picked]
-        summary = _summarise(keyframes, labels, scene_scores[picked], cfg.scenes)
+        summary = _summarise(keyframes)
         shots.append({
             "index": index,
             "start_frame": shot["start_frame"],

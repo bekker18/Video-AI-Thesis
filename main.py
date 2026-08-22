@@ -20,6 +20,7 @@ STAGES = [
     "02-segmentation",
     "03-profiler",
     "04-router",
+    "05-global-experts",
 ]
 
 
@@ -75,6 +76,15 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument("--router-agreement", type=float, default=0.0,
                    help="soft gate: fraction of a shot's keyframes a flag must hold in")
+
+    p.add_argument("--map-size", type=int, default=512,
+                   help="longest side of every dense map written by 05")
+    p.add_argument("--expert-batch", type=int, default=8)
+    p.add_argument("--seg-model", default="segformer-b1",
+                   choices=["segformer-b0", "segformer-b1", "segformer-b2"])
+    p.add_argument("--seg-top", type=int, default=10,
+                   help="classes or segments kept per keyframe")
+    p.add_argument("--tags", type=int, default=15, help="zero-shot tags kept per keyframe")
     return p.parse_args()
 
 
@@ -113,6 +123,11 @@ def main() -> None:
             text_conf=args.text_conf,
             scenes=args.scenes,
             router_agreement=args.router_agreement,
+            map_size=args.map_size,
+            expert_batch=args.expert_batch,
+            seg_model=args.seg_model,
+            seg_top=args.seg_top,
+            tags=args.tags,
         )
         download_models.ensure(name)
         print(f"[{name}] start")

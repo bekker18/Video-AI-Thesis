@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parent
 
 OPENCV_ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
 ULTRALYTICS = "https://github.com/ultralytics/assets/releases/download/v8.3.0"
+ANNOTATORS = "https://huggingface.co/lllyasviel/Annotators/resolve/main"
 
 
 @dataclass(frozen=True)
@@ -34,17 +35,39 @@ MODELS: dict[str, tuple[Model, ...]] = {
         Model("uva-cv-lab/OmniShotCut", "OmniShotCut_ckpt.pth"),
         Model("apple/MobileCLIP-S2-OpenCLIP"),
     ),
+    "05-global-experts": (
+        Model("depth-anything/Depth-Anything-V2-Small-hf"),
+        Model("nvidia/segformer-b1-finetuned-ade-512-512"),
+        Model("facebook/mask2former-swin-tiny-coco-panoptic"),
+    ),
 }
+
+PLACES365 = "http://places2.csail.mit.edu/models_places365"
+RAM_TAGS = (
+    "https://raw.githubusercontent.com/xinyu1205/recognize-anything/main/"
+    "ram/data/ram_tag_list.txt"
+)
 
 FILES: dict[str, tuple[File, ...]] = {
     "03-profiler": (
-        File(f"{OPENCV_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
-             "face_yunet.onnx"),
+        File(
+            f"{OPENCV_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+            "face_yunet.onnx",
+        ),
         # PP-OCRv3's DB detection stage, exported for OpenCV's dnn text detector.
-        File(f"{OPENCV_ZOO}/text_detection_ppocr/text_detection_en_ppocrv3_2023may.onnx",
-             "text_ppocrv3.onnx"),
-        File("https://raw.githubusercontent.com/CSAILVision/places365/master/categories_places365.txt",
-             "categories_places365.txt"),
+        File(
+            f"{OPENCV_ZOO}/text_detection_ppocr/text_detection_en_ppocrv3_2023may.onnx",
+            "text_ppocrv3.onnx",
+        ),
+    ),
+    "05-global-experts": (
+        File(f"{PLACES365}/resnet18_places365.pth.tar", "resnet18_places365.pth.tar"),
+        File(
+            "https://raw.githubusercontent.com/CSAILVision/places365/master/categories_places365.txt",
+            "categories_places365.txt",
+        ),
+        File(RAM_TAGS, "ram_tag_list.txt"),
+        File(f"{ANNOTATORS}/table5_pidinet.pth", "table5_pidinet.pth"),
     ),
 }
 
@@ -56,8 +79,8 @@ DETECTORS: dict[str, str] = {
     "rtdetr-l": f"{ULTRALYTICS}/rtdetr-l.pt",
 }
 
-# Backbone weights the model libraries fetch themselves. TORCH_HOME points into models/,
-# so these are downloaded once instead of on every run.
+# Backbone weights the model libraries fetch themselves.
+# TORCH_HOME points into models/, so these are downloaded once instead of on every run.
 BACKBONES: dict[str, tuple[str, ...]] = {
     "02-segmentation": ("https://download.pytorch.org/models/resnet18-f37072fd.pth",),
 }

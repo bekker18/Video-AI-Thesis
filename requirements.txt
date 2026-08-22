@@ -4,16 +4,14 @@ torch==2.5.1
 torchvision==0.20.1
 numpy==1.26.4
 pillow==11.0.0
-huggingface_hub==1.26.0
+huggingface_hub<1.0
 
 # 02-segmentation
 open_clip_torch==2.30.0
 opencv-python-headless==4.10.0.84
-ffmpeg-python==0.2.0  # imported by omnishotcut at load time
+ffmpeg-python==0.2.0
 
-# 03-profiler. ultralytics itself is installed --no-deps in the Dockerfile, because it
-# requires opencv-python (the GUI build) which would shadow opencv-python-headless and
-# needs libGL. These are the rest of its dependencies, left unpinned to stay resolvable.
+# 03-profiler
 matplotlib
 pandas
 psutil
@@ -24,5 +22,10 @@ scipy
 seaborn
 tqdm
 ultralytics-thop
+
+# 05-global-experts
+transformers==4.46.3
+einops==0.8.0
+scikit-image
 
 mypy==1.11.2

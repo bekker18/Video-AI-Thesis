@@ -5,5 +5,6 @@ files = ["main.py", "config.py", "download_models.py", "src"]
 mypy_path = "."
 
 [[tool.mypy.overrides]]
-module = ["omnishotcut.*", "open_clip.*", "ultralytics.*"]
+module = ["omnishotcut.*", "open_clip.*", "ultralytics.*", "controlnet_aux.*",
+          "transformers.*", "torchvision.*"]
 ignore_missing_imports = true

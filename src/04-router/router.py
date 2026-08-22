@@ -15,21 +15,57 @@ from typing import Any
 from config import Config
 
 # Scene-global and person-independent: these run on every shot, always.
-PLASTIC = ("depth", "edges", "scene", "tags")
+# Must match the experts 05-global-experts actually runs, or routing.json under-reports the active set.
+PLASTIC = (
+    "depth",
+    "normals",
+    "edges",
+    "scene",
+    "tags",
+    "semantic",
+    "panoptic",
+    "classical",
+)
 
-# Object classes whose downstream expert needs a stable identity across frames. Anything
-# outside this set still triggers object_masks, just not detection and tracking.
-IDENTITY_CLASSES = frozenset({
-    "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat",
-    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe",
-    "frisbee", "skateboard", "skis", "snowboard", "sports ball", "surfboard",
-    "tennis racket", "kite", "baseball bat",
-})
+# Object classes whose downstream expert needs a stable identity across frames.
+# Anything outside this set still triggers object_masks, just not detection and tracking.
+IDENTITY_CLASSES = frozenset(
+    {
+        "bicycle",
+        "car",
+        "motorcycle",
+        "airplane",
+        "bus",
+        "train",
+        "truck",
+        "boat",
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe",
+        "frisbee",
+        "skateboard",
+        "skis",
+        "snowboard",
+        "sports ball",
+        "surfboard",
+        "tennis racket",
+        "kite",
+        "baseball bat",
+    }
+)
 
 
 @dataclass(frozen=True)
 class Facts:
     """What the router is allowed to look at, resolved once per shot."""
+
     person: bool
     persons: int
     text: bool
@@ -57,7 +93,9 @@ def _facts(shot: dict[str, Any], floor: float) -> Facts:
     def gated(name: str) -> bool:
         return bool(flags.get(name)) and float(agreement.get(name, 1.0)) >= floor
 
-    classes = [c for c in counts.get("objects", {}) if float(per_class.get(c, 1.0)) >= floor]
+    classes = [
+        c for c in counts.get("objects", {}) if float(per_class.get(c, 1.0)) >= floor
+    ]
     person = gated("person")
     return Facts(
         person=person,
@@ -78,30 +116,52 @@ def _decisions(facts: Facts) -> list[dict[str, Any]]:
 
     identity = ", ".join(facts.identity) or "none"
     rules += [
-        ("detection_tracking", "conditional",
-         "a person is present, or an object that needs a stable identity downstream",
-         facts.person or bool(facts.identity),
-         f"person={facts.person}, identity objects: {identity}"),
-
-        ("face", "conditional", "a person is present",
-         facts.person, f"person={facts.person}, person_max={facts.persons}"),
-
-        ("body", "conditional", "a person is present",
-         facts.person, f"person={facts.person}, person_max={facts.persons}"),
-
-        ("pairwise_relations", "conditional",
-         "two or more people co-occur in at least one profiled keyframe",
-         facts.persons >= 2, f"person_max={facts.persons}"),
-
-        ("ocr", "conditional", "text is present",
-         facts.text, f"text={facts.text}"),
-
-        ("object_masks", "conditional", "objects are present",
-         facts.object, f"object={facts.object}, classes={facts.objects}"),
+        (
+            "detection_tracking",
+            "conditional",
+            "a person is present, or an object that needs a stable identity downstream",
+            facts.person or bool(facts.identity),
+            f"person={facts.person}, identity objects: {identity}",
+        ),
+        (
+            "face",
+            "conditional",
+            "a person is present",
+            facts.person,
+            f"person={facts.person}, person_max={facts.persons}",
+        ),
+        (
+            "body",
+            "conditional",
+            "a person is present",
+            facts.person,
+            f"person={facts.person}, person_max={facts.persons}",
+        ),
+        (
+            "pairwise_relations",
+            "conditional",
+            "two or more people co-occur in at least one profiled keyframe",
+            facts.persons >= 2,
+            f"person_max={facts.persons}",
+        ),
+        ("ocr", "conditional", "text is present", facts.text, f"text={facts.text}"),
+        (
+            "object_masks",
+            "conditional",
+            "objects are present",
+            facts.object,
+            f"object={facts.object}, classes={facts.objects}",
+        ),
     ]
 
     return [
-        {"expert": name, "kind": kind, "fired": fired, "rule": rule, "evidence": evidence}
+        {
+            "expert": name,
+            "kind": kind,
+            "fired": fired,
+            "rule": rule,
+            "evidence": evidence,
+        }
         for name, kind, rule, fired, evidence in rules
     ]
 
@@ -123,16 +183,18 @@ def run(cfg: Config) -> dict[str, Any]:
         if not facts.person:
             human_skipped += 1
 
-        shots.append({
-            "index": shot["index"],
-            "start_frame": shot["start_frame"],
-            "end_frame": shot["end_frame"],
-            "start_time": shot["start_time"],
-            "end_time": shot["end_time"],
-            "experts": active,
-            "skipped": [d["expert"] for d in decisions if not d["fired"]],
-            "decisions": decisions,
-        })
+        shots.append(
+            {
+                "index": shot["index"],
+                "start_frame": shot["start_frame"],
+                "end_frame": shot["end_frame"],
+                "start_time": shot["start_time"],
+                "end_time": shot["end_time"],
+                "experts": active,
+                "skipped": [d["expert"] for d in decisions if not d["fired"]],
+                "decisions": decisions,
+            }
+        )
 
     total = len(shots)
     meta = {
@@ -140,11 +202,19 @@ def run(cfg: Config) -> dict[str, Any]:
         "shot_count": total,
         "agreement_floor": cfg.router_agreement,
         "experts": sorted({e for s in shots for e in s["experts"]}),
-        "fired_shots": dict(sorted(fired_counts.items(), key=lambda kv: (-kv[1], kv[0]))),
-        "fired_share": {k: round(v / total, 3) for k, v in
-                        sorted(fired_counts.items(), key=lambda kv: (-kv[1], kv[0]))} if total else {},
+        "fired_shots": dict(
+            sorted(fired_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        ),
+        "fired_share": {
+            k: round(v / total, 3)
+            for k, v in sorted(fired_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        }
+        if total
+        else {},
         "human_pipeline_skipped": human_skipped,
         "shots": shots,
     }
-    (cfg.out_root / "routing.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (cfg.out_root / "routing.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
     return {k: v for k, v in meta.items() if k != "shots"}
