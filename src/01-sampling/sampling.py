@@ -55,10 +55,14 @@ def run(cfg: Config) -> dict[str, Any]:
                 break
             if cfg.width and frame.shape[1] > cfg.width:
                 height = round(frame.shape[0] * cfg.width / frame.shape[1])
-                frame = cv2.resize(frame, (cfg.width, height), interpolation=cv2.INTER_AREA)
+                frame = cv2.resize(
+                    frame, (cfg.width, height), interpolation=cv2.INTER_AREA
+                )
             size = (frame.shape[1], frame.shape[0])
             # Numbered from 0 so a filename matches the frame index other stages report.
-            cv2.imwrite(str(frames_dir / f"{written:06d}.{cfg.image_format}"), frame, params)
+            cv2.imwrite(
+                str(frames_dir / f"{written:06d}.{cfg.image_format}"), frame, params
+            )
             written += 1
         decoded += 1
     capture.release()
@@ -79,5 +83,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "sampled_fps": round(source_fps / stride, 3) if source_fps else 0.0,
         "image_format": cfg.image_format,
     }
-    (cfg.out_root / "sampling.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (cfg.out_root / "sampling.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
     return meta

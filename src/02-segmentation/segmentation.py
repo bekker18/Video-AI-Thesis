@@ -21,7 +21,9 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 BATCH = 128
 DUPLICATE = 0.98  # cosine above this counts as the same picture
-SHARP_POOL = 0.25  # fraction of the most representative frames to pick the sharpest from
+SHARP_POOL = (
+    0.25  # fraction of the most representative frames to pick the sharpest from
+)
 
 
 def _device(name: str) -> str:
@@ -40,11 +42,16 @@ def _load_shot_model(checkpoint: Path) -> tuple[Any, tuple[int, int]]:
 
     model = omnishotcut.load(str(checkpoint))
     args = getattr(model, "_model_args", None)
-    size = (int(getattr(args, "process_width", 128)), int(getattr(args, "process_height", 96)))
+    size = (
+        int(getattr(args, "process_width", 128)),
+        int(getattr(args, "process_height", 96)),
+    )
     return model, size
 
 
-def _detect_shots(model: Any, frames: Array, mode: str, overlap: int) -> tuple[list[list[int]], list[str], list[str]]:
+def _detect_shots(
+    model: Any, frames: Array, mode: str, overlap: int
+) -> tuple[list[list[int]], list[str], list[str]]:
     result = model.inference(frames, mode=mode, overlap=overlap)
     if mode == "clean_shot":
         return list(result), [], []
@@ -68,7 +75,9 @@ def _normalise(ranges: list[list[int]], frame_count: int) -> list[tuple[int, int
 
 def _sharpness(frame: Array) -> float:
     """Variance of the Laplacian; low means blurred or mid-motion."""
-    return float(cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var())
+    return float(
+        cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var()
+    )
 
 
 def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
@@ -84,14 +93,18 @@ def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
     return crop, mean, std
 
 
-def _scan(video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int]) -> tuple[Array, Array, Array, float]:
+def _scan(
+    video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int]
+) -> tuple[Array, Array, Array, float]:
     """Single decode pass. Each frame feeds three things: the small array OmniShotCut runs on,
     a MobileCLIP embedding, and a sharpness score. Full frames are never accumulated, so
     memory stays flat regardless of video length."""
     import open_clip
     import torch
 
-    model, _, preprocess = open_clip.create_model_and_transforms(CLIP_MODEL, cache_dir=str(cache_dir))
+    model, _, preprocess = open_clip.create_model_and_transforms(
+        CLIP_MODEL, cache_dir=str(cache_dir)
+    )
     model = model.to(device).eval()
     crop, mean, std = _preprocess_spec(preprocess)
 
@@ -113,7 +126,10 @@ def _scan(video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int])
             return
         stacked = torch.from_numpy(np.stack(batch)).to(device)
         tensor = stacked.permute(0, 3, 1, 2).float().div_(255).sub_(offset).div_(scale)
-        with torch.no_grad(), torch.autocast(device, dtype=torch.float16, enabled=device == "cuda"):
+        with (
+            torch.no_grad(),
+            torch.autocast(device, dtype=torch.float16, enabled=device == "cuda"),
+        ):
             features = model.encode_image(tensor)
         features = features.float()
         features /= features.norm(dim=-1, keepdim=True)
@@ -128,15 +144,22 @@ def _scan(video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int])
         # One downscale of the full frame, reused by all three consumers below.
         height, width = frame.shape[:2]
         ratio = crop / min(height, width)
-        mid = cv2.resize(frame, (round(width * ratio), round(height * ratio)),
-                         interpolation=cv2.INTER_AREA)
+        mid = cv2.resize(
+            frame,
+            (round(width * ratio), round(height * ratio)),
+            interpolation=cv2.INTER_AREA,
+        )
 
         top, left = (mid.shape[0] - crop) // 2, (mid.shape[1] - crop) // 2
         square = mid[top : top + crop, left : left + crop]
         batch.append(np.ascontiguousarray(cv2.cvtColor(square, cv2.COLOR_BGR2RGB)))
 
-        shot_frames.append(cv2.cvtColor(cv2.resize(mid, shot_size, interpolation=cv2.INTER_AREA),
-                                        cv2.COLOR_BGR2RGB))
+        shot_frames.append(
+            cv2.cvtColor(
+                cv2.resize(mid, shot_size, interpolation=cv2.INTER_AREA),
+                cv2.COLOR_BGR2RGB,
+            )
+        )
         sharp.append(_sharpness(mid))
 
         if len(batch) == BATCH:
@@ -147,8 +170,12 @@ def _scan(video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int])
     if not shot_frames:
         raise RuntimeError(f"decoded no frames from {video}")
 
-    return (np.asarray(shot_frames, dtype=np.uint8), np.concatenate(vectors),
-            np.asarray(sharp), fps)
+    return (
+        np.asarray(shot_frames, dtype=np.uint8),
+        np.concatenate(vectors),
+        np.asarray(sharp),
+        fps,
+    )
 
 
 def _select(embeddings: Array, sharp: Array, start: int, end: int, k: int) -> list[int]:
@@ -177,7 +204,9 @@ def _select(embeddings: Array, sharp: Array, start: int, end: int, k: int) -> li
 
         for j in list(ranked) + list(order):
             frame = start + lo + int(j)
-            if all(float(embeddings[frame] @ embeddings[c]) < DUPLICATE for c in chosen):
+            if all(
+                float(embeddings[frame] @ embeddings[c]) < DUPLICATE for c in chosen
+            ):
                 chosen.append(frame)
                 break
 
@@ -188,7 +217,9 @@ def _write_frames(video: Path, wanted: dict[int, list[Path]]) -> None:
     """Second decode pass, writing only the frames that were selected."""
     capture = cv2.VideoCapture(str(video))
     index = 0
-    remaining = sum(len(paths) for paths in wanted.values())  # a frame can have two names
+    remaining = sum(
+        len(paths) for paths in wanted.values()
+    )  # a frame can have two names
     while remaining:
         ok, frame = capture.read()
         if not ok:
@@ -211,10 +242,14 @@ def run(cfg: Config) -> dict[str, Any]:
     device = _device(cfg.device)
     shot_model, shot_size = _load_shot_model(cfg.model_dir / SHOT_CKPT)
 
-    shot_frames, embeddings, sharp, fps = _scan(cfg.video, device, cfg.model_dir, shot_size)
+    shot_frames, embeddings, sharp, fps = _scan(
+        cfg.video, device, cfg.model_dir, shot_size
+    )
     frame_count = len(shot_frames)
 
-    ranges, intra, inter = _detect_shots(shot_model, shot_frames, cfg.shot_mode, cfg.shot_overlap)
+    ranges, intra, inter = _detect_shots(
+        shot_model, shot_frames, cfg.shot_mode, cfg.shot_overlap
+    )
     detected = len(ranges)
     shots_range = _normalise(ranges, frame_count)
     del shot_frames
@@ -234,12 +269,14 @@ def run(cfg: Config) -> dict[str, Any]:
         for frame in _select(embeddings, sharp, start, end, cfg.keyframes):
             path = keys_dir / f"{index:04d}_{frame:06d}.jpg"
             wanted.setdefault(frame, []).append(path)
-            keyframes.append({
-                "frame": frame,
-                "time": round(frame / fps, 3),
-                "path": f"{keys_dir.name}/{path.name}",
-                "sharpness": round(float(sharp[frame]), 1),
-            })
+            keyframes.append(
+                {
+                    "frame": frame,
+                    "time": round(frame / fps, 3),
+                    "path": f"{keys_dir.name}/{path.name}",
+                    "sharpness": round(float(sharp[frame]), 1),
+                }
+            )
             keep.append(frame)
 
         shot: dict[str, Any] = {
@@ -274,5 +311,7 @@ def run(cfg: Config) -> dict[str, Any]:
     }
     if detected != len(shots):
         meta["dropped_ranges"] = detected - len(shots)
-    (cfg.out_root / "segmentation.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (cfg.out_root / "segmentation.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
     return {k: v for k, v in meta.items() if k != "shots"}

@@ -32,7 +32,9 @@ class Config:
     scenes: int  # scene labels kept per shot
 
     # 04-router
-    router_agreement: float  # soft gate: fraction of keyframes a flag must hold in; 0 = off
+    router_agreement: (
+        float  # soft gate: fraction of keyframes a flag must hold in; 0 = off
+    )
 
     # 05-global-experts
     map_size: int  # longest side of every dense map written

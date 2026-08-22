@@ -50,7 +50,9 @@ def _read_segmentation(out_root: Path) -> dict[str, Any]:
     return meta
 
 
-def _detect(weights: Path, images: list[Array], conf: float, device: str) -> list[list[dict[str, Any]]]:
+def _detect(
+    weights: Path, images: list[Array], conf: float, device: str
+) -> list[list[dict[str, Any]]]:
     """One forward pass over every keyframe; persons and objects come out together."""
     from ultralytics import RTDETR, YOLO
 
@@ -63,11 +65,13 @@ def _detect(weights: Path, images: list[Array], conf: float, device: str) -> lis
         names = result.names
         for box in result.boxes:
             xyxy = [int(v) for v in box.xyxy[0].tolist()]
-            boxes.append({
-                "label": str(names[int(box.cls[0])]),
-                "score": round(float(box.conf[0]), 3),
-                "box": xyxy,
-            })
+            boxes.append(
+                {
+                    "label": str(names[int(box.cls[0])]),
+                    "score": round(float(box.conf[0]), 3),
+                    "box": xyxy,
+                }
+            )
         frames.append(boxes)
     return frames
 
@@ -82,7 +86,9 @@ def _iou(a: list[int], b: list[int]) -> float:
     return overlap / union if union else 0.0
 
 
-def _dedupe(boxes: list[dict[str, Any]], threshold: float = 0.4) -> list[dict[str, Any]]:
+def _dedupe(
+    boxes: list[dict[str, Any]], threshold: float = 0.4
+) -> list[dict[str, Any]]:
     """Person boxes overlap, so the same face can be found in two crops."""
     kept: list[dict[str, Any]] = []
     for box in sorted(boxes, key=lambda b: -float(b["score"])):
@@ -91,7 +97,9 @@ def _dedupe(boxes: list[dict[str, Any]], threshold: float = 0.4) -> list[dict[st
     return kept
 
 
-def _faces(detector: Any, image: Array, persons: list[dict[str, Any]], conf: float) -> list[dict[str, Any]]:
+def _faces(
+    detector: Any, image: Array, persons: list[dict[str, Any]], conf: float
+) -> list[dict[str, Any]]:
     """YuNet inside each person box only, so a face is always tied to a body."""
     height, width = image.shape[:2]
     found: list[dict[str, Any]] = []
@@ -114,10 +122,12 @@ def _faces(detector: Any, image: Array, persons: list[dict[str, Any]], conf: flo
             if score < conf:
                 continue
             fx, fy, fw, fh = (int(v) for v in row[:4])
-            found.append({
-                "score": round(score, 3),
-                "box": [x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh],
-            })
+            found.append(
+                {
+                    "score": round(score, 3),
+                    "box": [x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh],
+                }
+            )
     return _dedupe(found)
 
 
@@ -161,7 +171,9 @@ def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
         "counts": {
             "person_max": max(persons, default=0),
             "face_max": max(faces, default=0),
-            "object_max": max((sum(k["object_counts"].values()) for k in keyframes), default=0),
+            "object_max": max(
+                (sum(k["object_counts"].values()) for k in keyframes), default=0
+            ),
             "objects": dict(sorted(classes.items())),
         },
         "agreement": {
@@ -170,7 +182,9 @@ def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
             "text": round(text_hits / total, 3),
             "object": round(object_hits / total, 3),
             # Per class, so a one-frame false positive is distinguishable from a real object.
-            "objects": {label: round(n / total, 3) for label, n in sorted(seen.items())},
+            "objects": {
+                label: round(n / total, 3) for label, n in sorted(seen.items())
+            },
         },
     }
 
@@ -211,17 +225,19 @@ def run(cfg: Config) -> dict[str, Any]:
 
         faces = _faces(face_detector, image, persons, cfg.face_conf)
         text = _text(text_detector, image, cfg.text_conf)
-        per_frame.append({
-            "frame": int(paths[i].stem.split("_")[1]),
-            "person_count": len(persons),
-            "face_count": len(faces),
-            "object_counts": counts,
-            "text_count": len(text),
-            "persons": persons,
-            "objects": objects,
-            "faces": faces,
-            "text": text,
-        })
+        per_frame.append(
+            {
+                "frame": int(paths[i].stem.split("_")[1]),
+                "person_count": len(persons),
+                "face_count": len(faces),
+                "object_counts": counts,
+                "text_count": len(text),
+                "persons": persons,
+                "objects": objects,
+                "faces": faces,
+                "text": text,
+            }
+        )
 
     shots: list[dict[str, Any]] = []
     for shot in segmentation["shots"]:
@@ -229,15 +245,17 @@ def run(cfg: Config) -> dict[str, Any]:
         picked = [i for i, owner in enumerate(owners) if owner == index]
         keyframes = [per_frame[i] for i in picked]
         summary = _summarise(keyframes)
-        shots.append({
-            "index": index,
-            "start_frame": shot["start_frame"],
-            "end_frame": shot["end_frame"],
-            "start_time": shot["start_time"],
-            "end_time": shot["end_time"],
-            **summary,
-            "keyframes": keyframes,
-        })
+        shots.append(
+            {
+                "index": index,
+                "start_frame": shot["start_frame"],
+                "end_frame": shot["end_frame"],
+                "start_time": shot["start_time"],
+                "end_time": shot["end_time"],
+                **summary,
+                "keyframes": keyframes,
+            }
+        )
 
     every_class: dict[str, int] = {}
     for shot_data in shots:
@@ -259,5 +277,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "object_totals": dict(sorted(every_class.items(), key=lambda kv: -kv[1])),
         "shots": shots,
     }
-    (cfg.out_root / "profile.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    (cfg.out_root / "profile.json").write_text(
+        json.dumps(meta, indent=2), encoding="utf-8"
+    )
     return {k: v for k, v in meta.items() if k != "shots"}
