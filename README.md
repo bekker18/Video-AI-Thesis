@@ -22,7 +22,7 @@ Output lands in `data/processed/<video_name>/`.
 
 ## Options
 
-| flag                         | default          | meaning[f]()                                                   |
+| flag                         | default          | meaning                                                       |
 | ---------------------------- | ---------------- | ------------------------------------------------------------- |
 | `--stages <name> ...`      | all              | run a subset, always in pipeline order                        |
 | `--device cpu\|cuda\|auto`   | `auto`         | where models run                                              |
