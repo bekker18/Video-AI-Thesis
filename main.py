@@ -53,38 +53,78 @@ def load_stage(name: str) -> Stage:
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Video AI pipeline")
     p.add_argument("video", help="path to input .mp4")
-    p.add_argument("--stages", nargs="+", default=STAGES,
-                   help="subset of stages to run, e.g. --stages 02-segmentation")
-    p.add_argument("--fps", type=float, default=None, help="sampling rate; default keeps every frame")
+    p.add_argument(
+        "--stages",
+        nargs="+",
+        default=STAGES,
+        help="subset of stages to run, e.g. --stages 02-segmentation",
+    )
+    p.add_argument(
+        "--fps",
+        type=float,
+        default=None,
+        help="sampling rate; default keeps every frame",
+    )
     p.add_argument("--image-format", choices=["jpg", "png"], default="jpg")
-    p.add_argument("--quality", type=int, default=95, help="jpeg quality, 0 (worst) to 100 (best)")
-    p.add_argument("--width", type=int, default=None, help="resize frames to this width")
+    p.add_argument(
+        "--quality", type=int, default=95, help="jpeg quality, 0 (worst) to 100 (best)"
+    )
+    p.add_argument(
+        "--width", type=int, default=None, help="resize frames to this width"
+    )
 
     p.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
-    p.add_argument("--shot-mode", choices=["default", "clean_shot"], default="default",
-                   help="clean_shot keeps only cuts and discards transitions")
-    p.add_argument("--shot-overlap", type=int, default=30,
-                   help="frames shared between adjacent inference windows")
-    p.add_argument("--keyframes", type=int, default=3, help="representative frames kept per shot")
+    p.add_argument(
+        "--shot-mode",
+        choices=["default", "clean_shot"],
+        default="default",
+        help="clean_shot keeps only cuts and discards transitions",
+    )
+    p.add_argument(
+        "--shot-overlap",
+        type=int,
+        default=30,
+        help="frames shared between adjacent inference windows",
+    )
+    p.add_argument(
+        "--keyframes", type=int, default=3, help="representative frames kept per shot"
+    )
 
-    p.add_argument("--detector", default="yolo11n",
-                   choices=["yolo11n", "yolo11s", "yolo11m", "rtdetr-l"])
+    p.add_argument(
+        "--detector",
+        default="yolo11s",
+        choices=["yolo11n", "yolo11s", "yolo11m", "rtdetr-l"],
+    )
     p.add_argument("--det-conf", type=float, default=0.25)
     p.add_argument("--face-conf", type=float, default=0.6)
     p.add_argument("--text-conf", type=float, default=0.5)
     p.add_argument("--scenes", type=int, default=3, help="scene labels kept per shot")
 
-    p.add_argument("--router-agreement", type=float, default=0.0,
-                   help="soft gate: fraction of a shot's keyframes a flag must hold in")
+    p.add_argument(
+        "--router-agreement",
+        type=float,
+        default=0.0,
+        help="soft gate: fraction of a shot's keyframes a flag must hold in",
+    )
 
-    p.add_argument("--map-size", type=int, default=512,
-                   help="longest side of every dense map written by 05")
+    p.add_argument(
+        "--map-size",
+        type=int,
+        default=512,
+        help="longest side of every dense map written by 05",
+    )
     p.add_argument("--expert-batch", type=int, default=8)
-    p.add_argument("--seg-model", default="segformer-b1",
-                   choices=["segformer-b0", "segformer-b1", "segformer-b2"])
-    p.add_argument("--seg-top", type=int, default=10,
-                   help="classes or segments kept per keyframe")
-    p.add_argument("--tags", type=int, default=15, help="zero-shot tags kept per keyframe")
+    p.add_argument(
+        "--seg-model",
+        default="segformer-b1",
+        choices=["segformer-b0", "segformer-b1", "segformer-b2"],
+    )
+    p.add_argument(
+        "--seg-top", type=int, default=10, help="classes or segments kept per keyframe"
+    )
+    p.add_argument(
+        "--tags", type=int, default=15, help="zero-shot tags kept per keyframe"
+    )
     return p.parse_args()
 
 
@@ -97,7 +137,9 @@ def main() -> None:
 
     unknown = [s for s in args.stages if s not in STAGES]
     if unknown:
-        sys.exit(f"unknown stage(s): {', '.join(unknown)}\navailable: {', '.join(STAGES)}")
+        sys.exit(
+            f"unknown stage(s): {', '.join(unknown)}\navailable: {', '.join(STAGES)}"
+        )
 
     out_root = ROOT / "data" / "processed" / video.stem
     out_root.mkdir(parents=True, exist_ok=True)
