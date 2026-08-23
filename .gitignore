@@ -3,6 +3,7 @@ models/*
 !models/.gitkeep
 __pycache__/
 *.py[cod]
+.venv/
 
 STATE.md
 HISTORY.md
