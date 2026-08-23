@@ -1,10 +1,44 @@
-[tool.mypy]
-python_version = "3.10"
-strict = true
-files = ["main.py", "config.py", "download_models.py", "src"]
-mypy_path = "."
+[project]
+name = "video-ai-thesis"
+version = "0.1.0"
+description = "A modular video processing pipeline."
+requires-python = "==3.10.*"
+dependencies = [
+    "torch==2.5.1",
+    "torchvision==0.20.1",
+    "numpy==1.26.4",
+    "pillow==11.0.0",
+    "huggingface_hub<1.0",
 
-[[tool.mypy.overrides]]
-module = ["omnishotcut.*", "open_clip.*", "ultralytics.*", "controlnet_aux.*",
-          "transformers.*", "torchvision.*"]
-ignore_missing_imports = true
+    # 02-segmentation
+    "omnishotcut",
+    "open_clip_torch==2.30.0",
+    "opencv-python-headless==4.10.0.84",
+    "ffmpeg-python==0.2.0",
+
+    # 05-global-experts
+    "transformers==4.46.3",
+    "einops==0.8.0",
+    "controlnet_aux==0.0.9",
+
+    # 06-detection-tracking
+    "ultralytics==8.3.40",
+    "lapx==0.5.11",
+]
+
+[tool.uv]
+package = false  # modules are loaded by path, nothing to build
+override-dependencies = [
+    "opencv-python; sys_platform == 'never'",  # headless already provides cv2
+    "timm>=1.0",                               # controlnet_aux pins timm<=0.6.7, open_clip needs current
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+omnishotcut = { git = "https://github.com/UVA-Computer-Vision-Lab/OmniShotCut.git" }

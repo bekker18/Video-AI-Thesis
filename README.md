@@ -2,6 +2,15 @@
 
 A modular video processing pipeline.
 
+## Local venv
+
+```bash
+uv sync
+```
+
+Installs everything into `.venv/` on Python 3.10. Point your editor at it, or prefix
+commands with `uv run`. The full pipeline still wants the container, for ffmpeg and CUDA.
+
 ## Build
 
 ```bash
@@ -41,6 +50,18 @@ Output lands in `data/processed/<video_name>/`.
 | `--seg-top 10`             | `10`           | classes or segments kept per keyframe                         |
 | `--tags 15`                | `15`           | zero-shot tags kept per keyframe                              |
 | `--expert-batch 8`         | `8`            | keyframes per forward pass in 05                              |
+| `--tracker botsort`        | `bytetrack`    | tracker used by 06                                            |
+| `--frame-source frames`    | `video`        | `frames` reads 01-sampling's output instead of decoding       |
+| `--det-stride 1`           | `2`            | detect every Nth frame; the rest are interpolated             |
+| `--track-low-conf 0.1`     | `0.1`          | floor for ByteTrack's second association pass                 |
+| `--track-high-conf 0.25`   | `0.25`         | first association pass takes detections above this            |
+| `--track-new-conf 0.25`    | `0.25`         | a new track starts only above this                            |
+| `--track-buffer 30`        | `30`           | frames a lost track survives before it is dropped             |
+| `--track-match 0.8`        | `0.8`          | IoU distance a match must beat                                |
+| `--track-batch 16`         | `16`           | frames per detector forward pass in 06                        |
+| `--crops 5`                | `5`            | best crops kept per track, per kind                           |
+| `--crop-pad 0.1`           | `0.1`          | fraction of the box added as margin                           |
+| `--min-track 3`            | `3`            | tracks shorter than this are dropped                          |
 
 ## Download model weights
 
@@ -49,10 +70,4 @@ To prefetch everything up front:
 
 ```bash
 docker compose run --rm --entrypoint python3 pipeline download_models.py
-```
-
-## Type check
-
-```bash
-docker compose run --rm --entrypoint mypy pipeline
 ```

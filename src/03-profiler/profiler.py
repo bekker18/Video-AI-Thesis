@@ -63,7 +63,7 @@ def _detect(
     for result in results:
         boxes: list[dict[str, Any]] = []
         names = result.names
-        for box in result.boxes:
+        for box in result.boxes or []:
             xyxy = [int(v) for v in box.xyxy[0].tolist()]
             boxes.append(
                 {

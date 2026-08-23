@@ -209,13 +209,15 @@ def _edges(images: list[Array], device: str, model_dir: Path) -> list[Array]:
     from controlnet_aux import PidiNetDetector
     from PIL import Image
 
-    detector = PidiNetDetector.from_pretrained(str(model_dir), filename=EDGE_WEIGHTS)
+    detector: Any = PidiNetDetector.from_pretrained(
+        str(model_dir), filename=EDGE_WEIGHTS
+    )
     detector = detector.to(device)
 
     maps: list[Array] = []
     for image in images:
         pil = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-        out = detector(
+        out: Image.Image = detector(
             pil, detect_resolution=512, image_resolution=max(image.shape[:2])
         )
         edge = np.asarray(out.convert("L"))
@@ -332,8 +334,10 @@ def _semantic(
     from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
     repo = SEMANTIC_MODELS[name]
-    processor = SegformerImageProcessor.from_pretrained(repo, cache_dir=str(cache))
-    model = SegformerForSemanticSegmentation.from_pretrained(repo, cache_dir=str(cache))
+    processor: Any = SegformerImageProcessor.from_pretrained(repo, cache_dir=str(cache))
+    model: Any = SegformerForSemanticSegmentation.from_pretrained(
+        repo, cache_dir=str(cache)
+    )
     model = model.to(device).eval()
     names = {int(k): v for k, v in model.config.id2label.items()}
 
@@ -361,7 +365,7 @@ def _panoptic(
     from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
     processor = AutoImageProcessor.from_pretrained(PANOPTIC_MODEL, cache_dir=str(cache))
-    model = Mask2FormerForUniversalSegmentation.from_pretrained(
+    model: Any = Mask2FormerForUniversalSegmentation.from_pretrained(
         PANOPTIC_MODEL, cache_dir=str(cache)
     )
     model = model.to(device).eval()
