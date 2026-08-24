@@ -62,6 +62,15 @@ Output lands in `data/processed/<video_name>/`.
 | `--crops 5`                | `5`            | best crops kept per track, per kind                           |
 | `--crop-pad 0.1`           | `0.1`          | fraction of the box added as margin                           |
 | `--min-track 3`            | `3`            | tracks shorter than this are dropped                          |
+| `--series-stride 2`        | `2`            | observed rows between series samples in 07                    |
+| `--blendshapes 10`         | `10`           | blendshape coefficients kept per sample                       |
+| `--attributes 8`           | `8`            | zero-shot face attributes kept per crop                       |
+
+## Type check
+
+```bash
+docker compose run --rm --entrypoint pyright pipeline main.py config.py download_models.py src/
+```
 
 ## Download model weights
 

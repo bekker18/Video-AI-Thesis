@@ -56,3 +56,8 @@ class Config:
     crops: int  # best crops kept per track
     crop_pad: float  # fraction of the box added as margin
     min_track: int  # tracks shorter than this are dropped
+
+    # 07-conditional-experts
+    series_stride: int  # observed rows between series samples
+    blendshapes: int  # blendshape coefficients kept per sample
+    attributes: int  # zero-shot attributes kept per crop

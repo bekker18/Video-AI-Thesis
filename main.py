@@ -22,6 +22,7 @@ STAGES = [
     "04-router",
     "05-global-experts",
     "06-detection-tracking",
+    "07-conditional-experts",
 ]
 
 
@@ -149,6 +150,19 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--crops", type=int, default=5, help="best crops kept per track")
     p.add_argument("--crop-pad", type=float, default=0.1)
     p.add_argument("--min-track", type=int, default=3)
+
+    p.add_argument(
+        "--series-stride",
+        type=int,
+        default=2,
+        help="observed rows between series samples in 07",
+    )
+    p.add_argument(
+        "--blendshapes", type=int, default=10, help="blendshapes kept per sample"
+    )
+    p.add_argument(
+        "--attributes", type=int, default=8, help="zero-shot attributes kept per crop"
+    )
     return p.parse_args()
 
 
@@ -206,6 +220,9 @@ def main() -> None:
             crops=args.crops,
             crop_pad=args.crop_pad,
             min_track=args.min_track,
+            series_stride=args.series_stride,
+            blendshapes=args.blendshapes,
+            attributes=args.attributes,
         )
         download_models.ensure(name)
         print(f"[{name}] start")

@@ -16,6 +16,12 @@ ROOT = Path(__file__).resolve().parent
 OPENCV_ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
 ULTRALYTICS = "https://github.com/ultralytics/assets/releases/download/v8.3.0"
 ANNOTATORS = "https://huggingface.co/lllyasviel/Annotators/resolve/main"
+MEDIAPIPE = "https://storage.googleapis.com/mediapipe-models"
+HSEMOTION = (
+    "https://github.com/av-savchenko/face-emotion-recognition/raw/main/models/"
+    "affectnet_emotions/onnx"
+)
+INSIGHTFACE = "https://github.com/deepinsight/insightface/releases/download/v0.7"
 
 
 @dataclass(frozen=True)
@@ -28,6 +34,14 @@ class Model:
 class File:
     url: str
     filename: str
+
+
+@dataclass(frozen=True)
+class Archive:
+    """A zip whose members are flattened into the stage directory."""
+
+    url: str
+    members: tuple[str, ...]
 
 
 MODELS: dict[str, tuple[Model, ...]] = {
@@ -69,6 +83,35 @@ FILES: dict[str, tuple[File, ...]] = {
         File(RAM_TAGS, "ram_tag_list.txt"),
         File(f"{ANNOTATORS}/table5_pidinet.pth", "table5_pidinet.pth"),
     ),
+    "07-conditional-experts": (
+        # One pass gives mesh, head pose and blendshapes.
+        File(
+            f"{MEDIAPIPE}/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            "face_landmarker.task",
+        ),
+        File(
+            f"{MEDIAPIPE}/pose_landmarker/pose_landmarker_full/float16/1/"
+            "pose_landmarker_full.task",
+            "pose_landmarker_full.task",
+        ),
+        # Eight emotions plus valence and arousal from one EfficientNet-B0 pass.
+        File(f"{HSEMOTION}/enet_b0_8_va_mtl.onnx", "emotion_enet_b0_va.onnx"),
+        # CRNN recognition: the half of OCR 03 deliberately left out.
+        File(
+            f"{OPENCV_ZOO}/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx",
+            "text_crnn_en.onnx",
+        ),
+    ),
+}
+
+# InsightFace ships its models as one release zip; two of the five are used.
+ARCHIVES: dict[str, tuple[Archive, ...]] = {
+    "07-conditional-experts": (
+        Archive(
+            f"{INSIGHTFACE}/buffalo_l.zip",
+            ("w600k_r50.onnx", "genderage.onnx"),
+        ),
+    ),
 }
 
 # Fetched on demand, so switching detector does not pull every variant.
@@ -104,6 +147,25 @@ def fetch(stage: str, url: str, filename: str) -> Path:
     return target
 
 
+def unpack(stage: str, archive: Archive) -> None:
+    """Members are flattened, so callers reference them by basename like any other file."""
+    import zipfile
+
+    target = stage_dir(stage)
+    wanted = [m for m in archive.members if not (target / Path(m).name).exists()]
+    if not wanted:
+        return
+
+    zip_path = target / "_archive.zip"
+    print(f"[{stage}] downloading {Path(archive.url).name}")
+    urllib.request.urlretrieve(archive.url, zip_path)
+    with zipfile.ZipFile(zip_path) as bundle:
+        for member in wanted:
+            with bundle.open(member) as src:
+                (target / Path(member).name).write_bytes(src.read())
+    zip_path.unlink()
+
+
 def detector(stage: str, name: str) -> Path:
     if name not in DETECTORS:
         raise ValueError(f"unknown detector {name}; choose from {', '.join(DETECTORS)}")
@@ -129,6 +191,9 @@ def ensure(stage: str) -> None:
     for item in FILES.get(stage, ()):
         fetch(stage, item.url, item.filename)
 
+    for archive in ARCHIVES.get(stage, ()):
+        unpack(stage, archive)
+
     for url in BACKBONES.get(stage, ()):
         import torch
 
@@ -136,7 +201,7 @@ def ensure(stage: str) -> None:
 
 
 def main() -> None:
-    stages = sys.argv[1:] or sorted({*MODELS, *FILES, *BACKBONES})
+    stages = sys.argv[1:] or sorted({*MODELS, *FILES, *ARCHIVES, *BACKBONES})
     for stage in stages:
         ensure(stage)
     if not sys.argv[1:]:

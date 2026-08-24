@@ -26,7 +26,7 @@ dependencies = [
     "lapx==0.5.11",
 
     # 07-conditional-experts
-    "mediapipe>=0.10.14,<0.11",
+    "mediapipe>=0.10.14,<0.10.30",
     "onnxruntime>=1.17,<2",
 ]
 
@@ -35,7 +35,7 @@ package = false  # modules are loaded by path, nothing to build
 override-dependencies = [
     "opencv-python; sys_platform == 'never'",          # headless already provides cv2
     "opencv-contrib-python; sys_platform == 'never'",  # mediapipe wants a third cv2 build
-    "timm>=1.0",                               # controlnet_aux pins timm<=0.6.7, open_clip needs current
+    "timm>=1.0",                                       # controlnet_aux pins timm<=0.6.7, open_clip needs current
 ]
 
 [[tool.uv.index]]
@@ -47,3 +47,6 @@ explicit = true
 torch = { index = "pytorch-cu124" }
 torchvision = { index = "pytorch-cu124" }
 omnishotcut = { git = "https://github.com/UVA-Computer-Vision-Lab/OmniShotCut.git" }
+
+[dependency-groups]
+dev = ["pyright>=1.1.390"]
