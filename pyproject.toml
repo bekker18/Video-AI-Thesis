@@ -24,12 +24,17 @@ dependencies = [
     # 06-detection-tracking
     "ultralytics==8.3.40",
     "lapx==0.5.11",
+
+    # 07-conditional-experts
+    "mediapipe>=0.10.14,<0.11",
+    "onnxruntime>=1.17,<2",
 ]
 
 [tool.uv]
 package = false  # modules are loaded by path, nothing to build
 override-dependencies = [
-    "opencv-python; sys_platform == 'never'",  # headless already provides cv2
+    "opencv-python; sys_platform == 'never'",          # headless already provides cv2
+    "opencv-contrib-python; sys_platform == 'never'",  # mediapipe wants a third cv2 build
     "timm>=1.0",                               # controlnet_aux pins timm<=0.6.7, open_clip needs current
 ]
 

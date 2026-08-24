@@ -42,3 +42,17 @@ class Config:
     seg_model: str  # segformer-b0 | segformer-b1 | segformer-b2
     seg_top: int  # classes or segments kept per keyframe
     tags: int  # zero-shot tags kept per keyframe
+
+    # 06-detection-tracking
+    tracker: str  # bytetrack | botsort
+    frame_source: str  # video | frames (01-sampling's output)
+    det_stride: int  # detect every Nth frame; the rest are interpolated
+    track_low_conf: float  # floor for ByteTrack's second association pass
+    track_high_conf: float  # first pass takes detections above this
+    track_new_conf: float  # a new track starts only above this
+    track_buffer: int  # frames a lost track survives before it is dropped
+    track_match: float  # IoU distance a match must beat
+    track_batch: int  # frames per detector forward pass
+    crops: int  # best crops kept per track
+    crop_pad: float  # fraction of the box added as margin
+    min_track: int  # tracks shorter than this are dropped

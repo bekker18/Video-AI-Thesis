@@ -7,7 +7,7 @@ import importlib.util
 import sys
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import download_models
 from config import Config
@@ -21,6 +21,7 @@ STAGES = [
     "03-profiler",
     "04-router",
     "05-global-experts",
+    "06-detection-tracking",
 ]
 
 
@@ -47,7 +48,7 @@ def load_stage(name: str) -> Stage:
     # Registered before exec so dataclasses in the stage can resolve their annotations.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
-    return module
+    return cast(Stage, module)
 
 
 def parse_args() -> argparse.Namespace:
@@ -125,6 +126,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--tags", type=int, default=15, help="zero-shot tags kept per keyframe"
     )
+
+    p.add_argument("--tracker", choices=["bytetrack", "botsort"], default="bytetrack")
+    p.add_argument(
+        "--frame-source",
+        choices=["video", "frames"],
+        default="video",
+        help="decode the video, or read 01-sampling's frames",
+    )
+    p.add_argument(
+        "--det-stride",
+        type=int,
+        default=2,
+        help="detect every Nth frame; the rest are interpolated",
+    )
+    p.add_argument("--track-low-conf", type=float, default=0.1)
+    p.add_argument("--track-high-conf", type=float, default=0.25)
+    p.add_argument("--track-new-conf", type=float, default=0.25)
+    p.add_argument("--track-buffer", type=int, default=30)
+    p.add_argument("--track-match", type=float, default=0.8)
+    p.add_argument("--track-batch", type=int, default=16)
+    p.add_argument("--crops", type=int, default=5, help="best crops kept per track")
+    p.add_argument("--crop-pad", type=float, default=0.1)
+    p.add_argument("--min-track", type=int, default=3)
     return p.parse_args()
 
 
@@ -170,6 +194,18 @@ def main() -> None:
             seg_model=args.seg_model,
             seg_top=args.seg_top,
             tags=args.tags,
+            tracker=args.tracker,
+            frame_source=args.frame_source,
+            det_stride=args.det_stride,
+            track_low_conf=args.track_low_conf,
+            track_high_conf=args.track_high_conf,
+            track_new_conf=args.track_new_conf,
+            track_buffer=args.track_buffer,
+            track_match=args.track_match,
+            track_batch=args.track_batch,
+            crops=args.crops,
+            crop_pad=args.crop_pad,
+            min_track=args.min_track,
         )
         download_models.ensure(name)
         print(f"[{name}] start")
