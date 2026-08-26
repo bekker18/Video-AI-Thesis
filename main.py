@@ -23,6 +23,8 @@ STAGES = [
     "05-global-experts",
     "06-detection-tracking",
     "07-conditional-experts",
+    "08-aggregation",
+    "09-fusion",
 ]
 
 
@@ -163,6 +165,29 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--attributes", type=int, default=8, help="zero-shot attributes kept per crop"
     )
+
+    p.add_argument(
+        "--agg-top", type=int, default=10, help="labels kept per distribution in 08"
+    )
+    p.add_argument(
+        "--pose-vis",
+        type=float,
+        default=0.5,
+        help="visibility a joint must reach to count in 08",
+    )
+
+    p.add_argument(
+        "--attention-deg",
+        type=float,
+        default=30.0,
+        help="cone width within which a head counts as attending someone",
+    )
+    p.add_argument(
+        "--sync-min",
+        type=int,
+        default=5,
+        help="shared affect samples a synchrony edge needs before it is computed",
+    )
     return p.parse_args()
 
 
@@ -223,6 +248,10 @@ def main() -> None:
             series_stride=args.series_stride,
             blendshapes=args.blendshapes,
             attributes=args.attributes,
+            agg_top=args.agg_top,
+            pose_vis=args.pose_vis,
+            attention_deg=args.attention_deg,
+            sync_min=args.sync_min,
         )
         download_models.ensure(name)
         print(f"[{name}] start")
