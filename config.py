@@ -61,3 +61,11 @@ class Config:
     series_stride: int  # observed rows between series samples
     blendshapes: int  # blendshape coefficients kept per sample
     attributes: int  # zero-shot attributes kept per crop
+
+    # 08-aggregation
+    agg_top: int  # labels kept per distribution
+    pose_vis: float  # visibility a joint must reach to count
+
+    # 09-fusion
+    attention_deg: float  # cone width for "attends to"
+    sync_min: int  # shared samples a synchrony edge needs
