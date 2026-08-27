@@ -8,6 +8,7 @@ services:
       - ./main.py:/app/main.py
       - ./config.py:/app/config.py
       - ./download_models.py:/app/download_models.py
+      - ./preview.py:/app/preview.py
       - ./pyproject.toml:/app/pyproject.toml
       - ./src:/app/src
     gpus: all

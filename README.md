@@ -65,12 +65,30 @@ Output lands in `data/processed/<video_name>/`.
 | `--series-stride 2`        | `2`            | observed rows between series samples in 07                    |
 | `--blendshapes 10`         | `10`           | blendshape coefficients kept per sample                       |
 | `--attributes 8`           | `8`            | zero-shot face attributes kept per crop                       |
+| `--agg-top 10`             | `10`           | labels kept per distribution in 08                            |
+| `--pose-vis 0.5`           | `0.5`          | visibility a joint must reach to count in 08                  |
+| `--attention-deg 30`       | `30`           | cone width within which a head counts as attending someone    |
+| `--sync-min 5`             | `5`            | shared affect samples a synchrony edge needs                  |
 
-## Type check
+## Preview the output
+
+Draws what 06, 07 and 09 produced back over the source video, for inspection.
 
 ```bash
-docker compose run --rm --entrypoint pyright pipeline main.py config.py download_models.py src/
+# all three views
+docker compose run --rm --entrypoint python3 pipeline preview.py messi
+
+# just one
+docker compose run --rm --entrypoint python3 pipeline preview.py messi --views fusion
 ```
+
+Writes `data/processed/<video>/<view>_preview.mp4`.
+
+| view | shows |
+| ---- | ----- |
+| `tracks` | 06 — person boxes, solid where detected and dashed where interpolated, faces in white, and the frames chosen as crops |
+| `conditional` | 07 — pose skeleton, head-pose axes, emotion with valence/arousal, recognised text |
+| `fusion` | 09 — the relation graph: amber attends, green mutual, cyan dashed synchrony |
 
 ## Download model weights
 

@@ -5,7 +5,3 @@ __pycache__/
 *.py[cod]
 .ruff_cache/
 .venv/
-
-STATE.md
-HISTORY.md
-PLANNED.md

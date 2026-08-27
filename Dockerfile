@@ -24,7 +24,7 @@ ENV PATH=/app/.venv/bin:$PATH \
     YOLO_CONFIG_DIR=/app/models/ultralytics \
     YOLO_OFFLINE=true
 
-COPY main.py config.py download_models.py ./
+COPY main.py config.py download_models.py preview.py ./
 COPY src/ src/
 
 ENTRYPOINT ["/app/.venv/bin/python", "main.py"]
