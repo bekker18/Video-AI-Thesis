@@ -4,10 +4,14 @@ Runs only where 04-router fired the matching expert, and consumes what 06 indexe
 than the video wherever possible: attribute crops and text regions are already on disk.
 
 Two sampling rates, because the consumers differ. Cheap, fast-moving experts (head pose,
-blendshapes, emotion, pose) run on a stride across a track's observed rows and produce the
-series 08 takes variance over. Expensive, slow-moving ones (identity embedding, age, gender,
-attributes) run on the handful of ranked crops 06 already selected. Nothing runs on an
-interpolated row - those are position estimates, not observations.
+blendshapes, emotion, pose) run on a stride across a track's observed rows and produce
+the series 09 takes variance over. Expensive, slow-moving ones (face and body embeddings, age,
+gender, attributes) run on the handful of ranked crops 06 already selected.
+Nothing runs on an interpolated row - those are position estimates, not observations.
+
+The two embeddings are what 08-consolidation clusters into global person ids.
+They are not interchangeable: ArcFace identifies a person and reaches a minority of tracks,
+body appearance reaches nearly all of them and identifies an outfit under one lighting.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ EMOTION_MODEL = "emotion_enet_b0_va.onnx"
 ARCFACE_MODEL = "w600k_r50.onnx"
 GENDERAGE_MODEL = "genderage.onnx"
 OCR_MODEL = "text_crnn_en.onnx"
+REID_MODEL = "reid_youtu.onnx"
 CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
@@ -48,6 +53,8 @@ EMOTIONS = (
     "surprise",
 )
 OCR_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
+REID_INPUT = (128, 256)  # width, height
+REID_BATCH = 16
 
 # insightface's 5-point template for a 112x112 aligned face.
 ARCFACE_TEMPLATE = np.array(
@@ -119,6 +126,12 @@ def _crop(image: Array, box: list[int], pad: float = 0.0) -> Array:
         return np.zeros((0, 0, 3), dtype=np.uint8)
     out: Array = image[y1:y2, x1:x2]
     return out
+
+
+def _new_entry() -> dict[str, Any]:
+    """Per-crop outputs for one track. Always all four keys,
+    so a track reached by only one of the two crop kinds still reads the same downstream."""
+    return {"embedding_rows": [], "body_rows": [], "gender_age": [], "clip": []}
 
 
 def _series_rows(track: dict[str, Any], stride: int) -> list[dict[str, Any]]:
@@ -285,11 +298,40 @@ def _embed_face(session: Any, aligned: Array) -> Array:
     return out / norm if norm else out
 
 
+def _embed_bodies(session: Any, crops: list[Array]) -> Array:
+    """YouTu ReID over 06's body crops. This is the descriptor 08-consolidation actually runs on:
+    a face embedding exists for a minority of tracks, a body crop for nearly all."""
+    mean = np.array([0.485, 0.456, 0.406], np.float32)
+    std = np.array([0.229, 0.224, 0.225], np.float32)
+    out: list[Array] = []
+    for start in range(0, len(crops), REID_BATCH):
+        batch = np.stack(
+            [
+                (
+                    cv2.cvtColor(
+                        cv2.resize(c, REID_INPUT, interpolation=cv2.INTER_LINEAR),
+                        cv2.COLOR_BGR2RGB,
+                    ).astype(np.float32)
+                    / 255.0
+                    - mean
+                )
+                / std
+                for c in crops[start : start + REID_BATCH]
+            ]
+        ).transpose(0, 3, 1, 2)
+        raw = np.asarray(
+            session.run(None, {session.get_inputs()[0].name: batch})[0]
+        ).reshape(batch.shape[0], -1)
+        out.append(raw)
+    stacked = np.concatenate(out)
+    norms = np.linalg.norm(stacked, axis=1, keepdims=True)
+    result: Array = stacked / np.where(norms == 0, 1.0, norms)
+    return result
+
+
 def _gender_age(session: Any, aligned: Array) -> dict[str, Any]:
     resized = cv2.resize(aligned, (96, 96), interpolation=cv2.INTER_LINEAR)
-    tensor = (
-        cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32) - 127.5
-    ) / 127.5
+    tensor = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
     raw = np.asarray(
         session.run(
             None, {session.get_inputs()[0].name: tensor.transpose(2, 0, 1)[None]}
@@ -475,7 +517,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     series.setdefault((shot, track_id), []).append(sample)
 
     # Attributes read 06's ranked crops straight off disk - no decoding at all.
-    attribute_jobs: list[tuple[int, int, Path]] = []
+    attribute_jobs: list[tuple[int, int, int, Path]] = []
     for shot in tracks_meta["shots"]:
         index = int(shot["index"])
         if not shot["tracked"] or "face" not in gates.get(index, set()):
@@ -484,7 +526,12 @@ def run(cfg: Config) -> dict[str, Any]:
             for crop in track["crops"]["face"]:
                 if crop["path"]:
                     attribute_jobs.append(
-                        (index, int(track["track_id"]), cfg.out_root / crop["path"])
+                        (
+                            index,
+                            int(track["track_id"]),
+                            int(crop["frame"]),
+                            cfg.out_root / crop["path"],
+                        )
                     )
 
     embeddings: list[Array] = []
@@ -495,7 +542,7 @@ def run(cfg: Config) -> dict[str, Any]:
 
         clip_crops: list[Array] = []
         clip_keys: list[tuple[int, int]] = []
-        for shot, track_id, path in attribute_jobs:
+        for shot, track_id, frame, path in attribute_jobs:
             image = cv2.imread(str(path))
             if image is None:
                 continue
@@ -514,10 +561,11 @@ def run(cfg: Config) -> dict[str, Any]:
                 image, matrix, (112, 112), borderValue=(0.0, 0.0, 0.0)
             )
 
-            entry = per_track.setdefault(
-                (shot, track_id), {"embedding_rows": [], "gender_age": [], "clip": []}
-            )
-            entry["embedding_rows"].append(len(embeddings))
+            entry = per_track.setdefault((shot, track_id), _new_entry())
+            # The row is recorded against the crop it came from: not every crop yields an embedding,
+            # so row order alone does not identify one.
+            # 08 gates on crop quality and needs to know which crop each vector is.
+            entry["embedding_rows"].append({"row": len(embeddings), "frame": frame})
             embeddings.append(_embed_face(arcface, aligned))
             entry["gender_age"].append(_gender_age(genderage, aligned))
             # CLIP reads the unaligned crop; the 112x112 warp is for ArcFace only.
@@ -530,6 +578,39 @@ def run(cfg: Config) -> dict[str, Any]:
             )
             for key, labels in zip(clip_keys, found):
                 per_track[key]["clip"].append(labels)
+
+    body_jobs: list[tuple[int, int, int, Path]] = []
+    for shot in tracks_meta["shots"]:
+        index = int(shot["index"])
+        if not shot["tracked"] or "body" not in gates.get(index, set()):
+            continue
+        for track in shot["tracks"]:
+            for crop in track["crops"]["body"]:
+                if crop["path"]:
+                    body_jobs.append(
+                        (
+                            index,
+                            int(track["track_id"]),
+                            int(crop["frame"]),
+                            cfg.out_root / crop["path"],
+                        )
+                    )
+
+    body_embeddings: Array = np.zeros((0, 0), dtype=np.float32)
+    if body_jobs:
+        loaded: list[Array] = []
+        keys: list[tuple[int, int, int]] = []
+        for shot, track_id, frame, path in body_jobs:
+            image = cv2.imread(str(path))
+            if image is None:
+                continue
+            loaded.append(image)
+            keys.append((shot, track_id, frame))
+        if loaded:
+            body_embeddings = _embed_bodies(_session(model_dir / REID_MODEL), loaded)
+            for row, (shot, track_id, frame) in enumerate(keys):
+                entry = per_track.setdefault((shot, track_id), _new_entry())
+                entry["body_rows"].append({"row": row, "frame": frame})
 
     text_by_shot: dict[int, list[dict[str, Any]]] = {}
     if want_ocr:
@@ -602,6 +683,8 @@ def run(cfg: Config) -> dict[str, Any]:
 
     if embeddings:
         np.save(cfg.out_root / "face_embeddings.npy", np.stack(embeddings))
+    if body_embeddings.size:
+        np.save(cfg.out_root / "body_embeddings.npy", body_embeddings)
 
     meta = {
         "video": segmentation["video"],
@@ -611,6 +694,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "series_samples": sum(len(v) for v in series.values()),
         "tracks_with_series": len(series),
         "face_embeddings": len(embeddings),
+        "body_embeddings": int(body_embeddings.shape[0]),
         "text_regions": sum(len(v) for v in text_by_shot.values()),
         "models": {
             "face_mesh_pose_blendshapes": FACE_MODEL,
@@ -618,12 +702,13 @@ def run(cfg: Config) -> dict[str, Any]:
             "emotion": EMOTION_MODEL,
             "identity": ARCFACE_MODEL,
             "gender_age": GENDERAGE_MODEL,
+            "body_appearance": REID_MODEL,
             "ocr": OCR_MODEL,
             "attributes": CLIP_MODEL,
         },
         "note": "series samples are observations only; interpolated rows are never measured",
-        # Recorded rather than silently skipped: the router fires object_masks, and nothing
-        # here answers it. SAM 2 is a separate dependency and is not installed.
+        # Recorded rather than silently skipped: the router fires object_masks,
+        # and nothing here answers it. SAM 2 is a separate dependency and is not installed.
         "not_implemented": ["object_masks"],
         "shots": shots,
     }
