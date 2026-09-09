@@ -1,4 +1,4 @@
-"""Renders the output of 06, 07 and 09 back over the source video.
+"""Renders the output of 06, 07, 08 and 10 back over the source video.
 
     python3 preview.py messi
     python3 preview.py messi --views fusion
@@ -443,21 +443,32 @@ def _conditional_view(root: Path) -> Draw:
 # Fusion
 
 
+def _person_tracks(fused: dict[str, Any]) -> dict[int, list[tuple[int, int]]]:
+    return {
+        int(e["person_id"]): [
+            (int(t["segment"]), int(t["track_id"])) for t in e["tracks"]
+        ]
+        for e in fused["entities"]
+    }
+
+
 def _fusion_view(root: Path) -> Draw:
     tracks = _load(root, "tracks.json", "06-detection-tracking")
-    fused = _load(root, "fused.json", "09-fusion")
+    fused = _load(root, "fused.json", "10-fusion")
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
+    owned = _person_tracks(fused)
+    here_in = {int(s["index"]): [int(p) for p in s["person_ids"]] for s in fused["shots"]}
 
-    edges: dict[int, list[dict[str, Any]]] = {}
-    entities: dict[int, list[int]] = {}
-    for shot in fused["shots"]:
-        index = int(shot["index"])
-        entities[index] = [int(e["track_id"]) for e in shot["entities"]]
-        edges[index] = shot["relations"]
+    def row_at(pid: int, index: int) -> dict[str, Any] | None:
+        for shot, tid in owned.get(pid, []):
+            found = rows.get((shot, tid, index))
+            if found is not None:
+                return found
+        return None
 
-    def anchor(shot: int, tid: int, index: int) -> tuple[int, int] | None:
-        row = rows.get((shot, tid, index))
+    def anchor(pid: int, index: int) -> tuple[int, int] | None:
+        row = row_at(pid, index)
         return None if row is None else _centre(row["face"] or row["body"])
 
     def draw(frame: Array, index: int) -> None:
@@ -466,9 +477,10 @@ def _fusion_view(root: Path) -> Draw:
             return
         shown: list[tuple[dict[str, Any], float, float]] = []
 
-        for relation in edges.get(shot, []):
-            a = anchor(shot, int(relation["a"]), index)
-            b = anchor(shot, int(relation["b"]), index)
+        # Relations are video-scoped now, so a pair is drawn wherever both are on screen.
+        for relation in fused["relations"]:
+            a = anchor(int(relation["a"]), index)
+            b = anchor(int(relation["b"]), index)
             if a is None or b is None:
                 continue
             ab = float(relation["attention"]["a_to_b"].get("share", 0.0))
@@ -508,22 +520,22 @@ def _fusion_view(root: Path) -> Draw:
             cv2.putText(frame, tag, (mid[0] + 4, mid[1] - 4), FONT, 0.4, colour, 1)
 
         here = 0
-        for tid in entities.get(shot, []):
-            row = rows.get((shot, tid, index))
+        for pid in here_in.get(shot, []):
+            row = row_at(pid, index)
             if not row:
                 continue
             here += 1
             x1, y1, x2, y2 = row["body"]
             cv2.rectangle(frame, (x1, y1), (x2, y2), (70, 70, 70), 1)
             cv2.putText(
-                frame, f"#{tid}", (x1 + 3, y1 + 14), FONT, 0.42, (170, 170, 170), 1
+                frame, f"P{pid}", (x1 + 3, y1 + 14), FONT, 0.42, (170, 170, 170), 1
             )
 
         lines: list[tuple[str, tuple[int, int, int]]] = []
         for relation, ab, ba in shown[:4]:
             place = relation["placement"]
             text = (
-                f"{relation['a']}-{relation['b']}  a->b {ab:.2f}  b->a {ba:.2f}  "
+                f"P{relation['a']}-P{relation['b']}  a->b {ab:.2f}  b->a {ba:.2f}  "
                 f"{place['horizontal']}/{place['vertical']}  nearer {place['nearer']}"
             )
             if relation["synchrony"]["available"]:
@@ -544,10 +556,86 @@ def _fusion_view(root: Path) -> Draw:
     return draw
 
 
+# Consolidation
+
+
+def _consolidation_view(root: Path) -> Draw:
+    """The same boxes as the tracks view, labelled with 08's person id instead of 06's
+    track id. Rendered side by side with tracks_preview.mp4 it shows what was merged and
+    what was left alone, which is the only check on this stage that does not need a
+    ground-truth annotation."""
+    tracks = _load(root, "tracks.json", "06-detection-tracking")
+    con = _load(root, "consolidated.json", "08-consolidation")
+    shot_of = _shot_map(tracks)
+    rows = _rows(tracks)
+
+    person_of: dict[tuple[int, int], dict[str, Any]] = {}
+    for person in con["persons"]:
+        for track in person["tracks"]:
+            person_of[(int(track["segment"]), int(track["track_id"]))] = person
+
+    by_shot: dict[int, list[tuple[int, int]]] = {}
+    for shot in tracks["shots"]:
+        if not shot["tracked"]:
+            continue
+        for track in shot["tracks"]:
+            by_shot.setdefault(int(shot["index"]), []).append(
+                (int(shot["index"]), int(track["track_id"]))
+            )
+
+    def draw(frame: Array, index: int) -> None:
+        shot = shot_of.get(index)
+        if shot is None:
+            return
+        drawn = merged = 0
+        for key in by_shot.get(shot, []):
+            row = rows.get((key[0], key[1], index))
+            if row is None:
+                continue
+            person = person_of.get(key)
+            if person is None:
+                continue
+            drawn += 1
+            pid = int(person["person_id"])
+            colour = PALETTE[pid % len(PALETTE)]
+            if person["abstained"]:
+                colour = (120, 120, 120)
+            elif person["linked"]:
+                merged += 1
+            x1, y1, x2, y2 = row["body"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), colour, 2)
+            tag = f"P{pid}"
+            if person["linked"]:
+                tag += f" x{len(person['tracks'])}"
+            if person["abstained"]:
+                tag += " ?"
+            cv2.putText(frame, tag, (x1 + 3, y1 + 15), FONT, 0.45, colour, 1)
+            cv2.putText(
+                frame,
+                f"t{key[1]}",
+                (x1 + 3, y2 - 5),
+                FONT,
+                0.36,
+                (150, 150, 150),
+                1,
+            )
+
+        _banner(
+            frame,
+            f"frame {index:5d}  shot {shot}  boxes {drawn}  merged {merged}  "
+            f"{con['track_count']} tracks -> {con['person_count']} people",
+            "P=person id  x N=tracks merged  ?=abstained  t=06 track id",
+            bool(drawn),
+        )
+
+    return draw
+
+
 VIEWS: dict[str, tuple[Callable[[Path], Draw], str]] = {
     "tracks": (_tracks_view, "06-detection-tracking"),
     "conditional": (_conditional_view, "07-conditional-experts"),
-    "fusion": (_fusion_view, "09-fusion"),
+    "consolidation": (_consolidation_view, "08-consolidation"),
+    "fusion": (_fusion_view, "10-fusion"),
 }
 
 

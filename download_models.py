@@ -101,6 +101,12 @@ FILES: dict[str, tuple[File, ...]] = {
             f"{OPENCV_ZOO}/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx",
             "text_crnn_en.onnx",
         ),
+        # Body appearance for 08-consolidation, which is the only descriptor most tracks get:
+        # a face embedding exists for 4 of patrick.mp4's 69 tracks, a body crop for 68.
+        File(
+            f"{OPENCV_ZOO}/person_reid_youtureid/person_reid_youtu_2021nov.onnx",
+            "reid_youtu.onnx",
+        ),
     ),
 }
 
