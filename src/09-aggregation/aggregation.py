@@ -73,8 +73,8 @@ def _stats(values: list[float]) -> dict[str, Any]:
 def _distribution(
     rows: list[dict[str, float]], labels: tuple[str, ...]
 ) -> dict[str, Any]:
-    """Mean of the per-sample probability vectors, not a vote. The modal label plus the
-    fraction of samples that agreed with it, so disagreement stays visible."""
+    """Mean of the per-sample probability vectors, not a vote. The modal label plus
+    the fraction of samples that agreed with it, so disagreement stays visible."""
     if not rows:
         return {"n": 0}
     matrix = np.asarray([[float(r.get(k, 0.0)) for k in labels] for r in rows])
@@ -90,8 +90,8 @@ def _distribution(
 
 
 def _labelled(entries: list[list[dict[str, Any]]], top: int) -> list[dict[str, Any]]:
-    """Sparse label lists (tags, attributes, scenes) aggregated by mean score and how many
-    of the sources actually offered the label."""
+    """Sparse label lists (tags, attributes, scenes) aggregated by mean score
+    and how many of the sources actually offered the label."""
     totals: dict[str, list[float]] = {}
     for row in entries:
         for item in row:
@@ -110,8 +110,7 @@ def _pose_summary(samples: list[dict[str, Any]], floor: float) -> dict[str, Any]
     rather than of camera distance. Joints predicted outside the crop are dropped first.
 
     A person's samples now span several segments, and the displacement between the last sample
-    of one and the first of the next is a cut, not a movement. Consecutive pairs are taken
-    only inside a segment.
+    of one and the first of the next is a cut, not a movement. Consecutive pairs are taken only inside a segment.
     """
     usable: list[tuple[int, int, Array, Array]] = []
     for sample in samples:
@@ -407,8 +406,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "pose_vis_floor": cfg.pose_vis,
         "top_k": cfg.agg_top,
         "note": (
-            "records are video-scoped: one per global person from 08, over every track it "
-            "was resolved from"
+            "records are video-scoped: one per global person from 08, over every track it was resolved from"
         ),
         "persons": persons,
         "shots": shots,
