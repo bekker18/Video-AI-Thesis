@@ -56,8 +56,8 @@ def _free(model: Any) -> None:
         torch.cuda.empty_cache()
 
 
-def _keyframes(out_root: Path) -> tuple[list[str], list[Path], list[int]]:
-    path = out_root / "segmentation.json"
+def _keyframes(out_root: Path, json_dir: Path) -> tuple[list[str], list[Path], list[int]]:
+    path = json_dir / "segmentation.json"
     if not path.exists():
         raise RuntimeError(f"missing {path}; run 02-segmentation first")
     meta = json.loads(path.read_text(encoding="utf-8"))
@@ -428,7 +428,7 @@ def _coverage(label_map: Array, names: dict[int, str], top: int) -> dict[str, fl
 
 def run(cfg: Config) -> dict[str, Any]:
     device = _device(cfg.device)
-    keys, paths, shots = _keyframes(cfg.out_root)
+    keys, paths, shots = _keyframes(cfg.out_root, cfg.json_dir)
     clip_cache = download_models.stage_dir("02-segmentation")
 
     raw = [cv2.imread(str(p)) for p in paths]
@@ -478,7 +478,7 @@ def run(cfg: Config) -> dict[str, Any]:
     ):
         record["scene"] = scene
 
-    embeddings: Array = np.load(cfg.out_root / "keyframe_embeddings.npy")
+    embeddings: Array = np.load(cfg.embeddings_dir / "keyframe_embeddings.npy")
     for record, tags in zip(
         records, _tags(embeddings, device, cfg.model_dir, clip_cache, cfg.tags)
     ):
@@ -523,7 +523,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "note": "panoptic segment_index is per-keyframe geometry, never an identity",
         "keyframes": records,
     }
-    (cfg.out_root / "global.json").write_text(
+    (cfg.json_dir / "global.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "keyframes"}

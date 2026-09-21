@@ -74,8 +74,8 @@ class Facts:
     identity: tuple[str, ...]
 
 
-def _read_profile(out_root: Path) -> dict[str, Any]:
-    path = out_root / "profile.json"
+def _read_profile(json_dir: Path) -> dict[str, Any]:
+    path = json_dir / "profile.json"
     if not path.exists():
         raise RuntimeError(f"missing {path}; run 03-profiler first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -167,7 +167,7 @@ def _decisions(facts: Facts) -> list[dict[str, Any]]:
 
 
 def run(cfg: Config) -> dict[str, Any]:
-    profile = _read_profile(cfg.out_root)
+    profile = _read_profile(cfg.json_dir)
 
     shots: list[dict[str, Any]] = []
     fired_counts: dict[str, int] = {}
@@ -214,7 +214,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "human_pipeline_skipped": human_skipped,
         "shots": shots,
     }
-    (cfg.out_root / "routing.json").write_text(
+    (cfg.json_dir / "routing.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "shots"}

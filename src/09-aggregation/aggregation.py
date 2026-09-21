@@ -42,8 +42,8 @@ CLASSICAL_KEYS = (
 )
 
 
-def _read(out_root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = out_root / name
+def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
+    path = json_dir / name
     if not path.exists():
         raise RuntimeError(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -315,12 +315,12 @@ def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def run(cfg: Config) -> dict[str, Any]:
-    segmentation = _read(cfg.out_root, "segmentation.json", "02-segmentation")
-    routing = _read(cfg.out_root, "routing.json", "04-router")
-    tracks_meta = _read(cfg.out_root, "tracks.json", "06-detection-tracking")
-    conditional = _read(cfg.out_root, "conditional.json", "07-conditional-experts")
-    global_meta = _read(cfg.out_root, "global.json", "05-global-experts")
-    consolidated = _read(cfg.out_root, "consolidated.json", "08-consolidation")
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    routing = _read(cfg.json_dir, "routing.json", "04-router")
+    tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
+    conditional = _read(cfg.json_dir, "conditional.json", "07-conditional-experts")
+    global_meta = _read(cfg.json_dir, "global.json", "05-global-experts")
+    consolidated = _read(cfg.json_dir, "consolidated.json", "08-consolidation")
 
     fps = float(segmentation["fps"])
     gates = {int(s["index"]): sorted(s["experts"]) for s in routing["shots"]}
@@ -411,7 +411,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "persons": persons,
         "shots": shots,
     }
-    (cfg.out_root / "aggregated.json").write_text(
+    (cfg.json_dir / "aggregated.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k not in {"persons", "shots"}}

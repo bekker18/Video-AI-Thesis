@@ -5,6 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+# Output layout under data/processed/<video>/.
+JSON_DIR = "json"
+EMBEDDINGS_DIR = "embeddings"
+PREVIEWS_DIR = "previews"
+
+
+def _subdir(root: Path, name: str) -> Path:
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
 
 @dataclass(frozen=True)
 class Config:
@@ -77,3 +88,11 @@ class Config:
     # 10-fusion
     attention_deg: float  # cone width for "attends to"
     sync_min: int  # shared samples a synchrony edge needs
+
+    @property
+    def json_dir(self) -> Path:
+        return _subdir(self.out_root, JSON_DIR)
+
+    @property
+    def embeddings_dir(self) -> Path:
+        return _subdir(self.out_root, EMBEDDINGS_DIR)

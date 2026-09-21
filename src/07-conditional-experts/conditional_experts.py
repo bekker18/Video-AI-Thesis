@@ -106,8 +106,8 @@ def _device(name: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _read(out_root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = out_root / name
+def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
+    path = json_dir / name
     if not path.exists():
         raise RuntimeError(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -455,10 +455,10 @@ def _frames(video: Path, wanted: set[int]) -> Iterator[tuple[int, Array]]:
 
 def run(cfg: Config) -> dict[str, Any]:
     device = _device(cfg.device)
-    segmentation = _read(cfg.out_root, "segmentation.json", "02-segmentation")
-    routing = _read(cfg.out_root, "routing.json", "04-router")
-    tracks_meta = _read(cfg.out_root, "tracks.json", "06-detection-tracking")
-    profile = _read(cfg.out_root, "profile.json", "03-profiler")
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    routing = _read(cfg.json_dir, "routing.json", "04-router")
+    tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
+    profile = _read(cfg.json_dir, "profile.json", "03-profiler")
 
     download_models.ensure(STAGE)
     model_dir = cfg.model_dir
@@ -682,9 +682,9 @@ def run(cfg: Config) -> dict[str, Any]:
             landmarker.close()
 
     if embeddings:
-        np.save(cfg.out_root / "face_embeddings.npy", np.stack(embeddings))
+        np.save(cfg.embeddings_dir / "face_embeddings.npy", np.stack(embeddings))
     if body_embeddings.size:
-        np.save(cfg.out_root / "body_embeddings.npy", body_embeddings)
+        np.save(cfg.embeddings_dir / "body_embeddings.npy", body_embeddings)
 
     meta = {
         "video": segmentation["video"],
@@ -712,7 +712,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "not_implemented": ["object_masks"],
         "shots": shots,
     }
-    (cfg.out_root / "conditional.json").write_text(
+    (cfg.json_dir / "conditional.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "shots"}

@@ -294,7 +294,7 @@ def run(cfg: Config) -> dict[str, Any]:
         shots.append(shot)
 
     _write_frames(cfg.video, wanted)
-    np.save(cfg.out_root / "keyframe_embeddings.npy", embeddings[keep])
+    np.save(cfg.embeddings_dir / "keyframe_embeddings.npy", embeddings[keep])
 
     meta = {
         "video": str(cfg.video),
@@ -311,7 +311,7 @@ def run(cfg: Config) -> dict[str, Any]:
     }
     if detected != len(shots):
         meta["dropped_ranges"] = detected - len(shots)
-    (cfg.out_root / "segmentation.json").write_text(
+    (cfg.json_dir / "segmentation.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "shots"}

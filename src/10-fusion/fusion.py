@@ -32,8 +32,8 @@ STAGE = "10-fusion"
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 
-def _read(out_root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = out_root / name
+def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
+    path = json_dir / name
     if not path.exists():
         raise RuntimeError(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -197,10 +197,10 @@ def _placement(
 
 
 def run(cfg: Config) -> dict[str, Any]:
-    segmentation = _read(cfg.out_root, "segmentation.json", "02-segmentation")
-    tracks_meta = _read(cfg.out_root, "tracks.json", "06-detection-tracking")
-    conditional = _read(cfg.out_root, "conditional.json", "07-conditional-experts")
-    aggregated = _read(cfg.out_root, "aggregated.json", "09-aggregation")
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
+    conditional = _read(cfg.json_dir, "conditional.json", "07-conditional-experts")
+    aggregated = _read(cfg.json_dir, "aggregated.json", "09-aggregation")
 
     rows: dict[tuple[int, int], dict[int, dict[str, Any]]] = {}
     for shot in tracks_meta["shots"]:
@@ -357,7 +357,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "relations": relations,
         "shots": shots,
     }
-    (cfg.out_root / "fused.json").write_text(
+    (cfg.json_dir / "fused.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {

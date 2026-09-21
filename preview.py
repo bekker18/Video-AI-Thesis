@@ -1,9 +1,8 @@
 """Renders the output of 06, 07, 08 and 10 back over the source video.
 
-    python3 preview.py messi
-    python3 preview.py messi --views fusion
+python3 preview.py messi
+python3 preview.py messi --views fusion
 
-Writes data/processed/<video>/<view>_preview.mp4. Inspection only - no stage reads these.
 """
 
 from __future__ import annotations
@@ -18,6 +17,8 @@ from typing import Any, TypeAlias
 
 import cv2
 import numpy as np
+
+from config import JSON_DIR, PREVIEWS_DIR
 
 ROOT = Path(__file__).resolve().parent
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
@@ -84,7 +85,7 @@ POSE_EDGES = (
 
 
 def _load(root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = root / name
+    path = root / JSON_DIR / name
     if not path.exists():
         sys.exit(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -458,7 +459,9 @@ def _fusion_view(root: Path) -> Draw:
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
     owned = _person_tracks(fused)
-    here_in = {int(s["index"]): [int(p) for p in s["person_ids"]] for s in fused["shots"]}
+    here_in = {
+        int(s["index"]): [int(p) for p in s["person_ids"]] for s in fused["shots"]
+    }
 
     def row_at(pid: int, index: int) -> dict[str, Any] | None:
         for shot, tid in owned.get(pid, []):
@@ -677,9 +680,11 @@ def main() -> None:
         sys.exit(f"no processed output at {root}")
 
     source = ROOT / str(_load(root, "segmentation.json", "02-segmentation")["video"])
+    previews = root / PREVIEWS_DIR
+    previews.mkdir(parents=True, exist_ok=True)
     for name in args.views:
         build, produced_by = VIEWS[name]
-        out_path = root / f"{name}_preview.mp4"
+        out_path = previews / f"{name}_preview.mp4"
         frames = render(source, out_path, build(root))
         print(f"{args.video} {name}: {frames} frames -> {out_path}  ({produced_by})")
 

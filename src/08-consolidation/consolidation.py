@@ -37,17 +37,17 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 Key: TypeAlias = tuple[int, int]  # (segment, track_id)
 
 
-def _read(out_root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = out_root / name
+def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
+    path = json_dir / name
     if not path.exists():
         raise RuntimeError(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
     return meta
 
 
-def _load(out_root: Path, name: str) -> Array:
+def _load(embeddings_dir: Path, name: str) -> Array:
     """A modality with no rows is normal - cat1.mp4 yields no face at all."""
-    path = out_root / name
+    path = embeddings_dir / name
     if not path.exists():
         return np.zeros((0, 0), dtype=np.float32)
     out: Array = np.load(path)
@@ -196,11 +196,11 @@ def _mean(vectors: list[Array | None]) -> Array | None:
 
 
 def run(cfg: Config) -> dict[str, Any]:
-    segmentation = _read(cfg.out_root, "segmentation.json", "02-segmentation")
-    tracks_meta = _read(cfg.out_root, "tracks.json", "06-detection-tracking")
-    conditional = _read(cfg.out_root, "conditional.json", "07-conditional-experts")
-    faces = _load(cfg.out_root, "face_embeddings.npy")
-    bodies = _load(cfg.out_root, "body_embeddings.npy")
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
+    conditional = _read(cfg.json_dir, "conditional.json", "07-conditional-experts")
+    faces = _load(cfg.embeddings_dir, "face_embeddings.npy")
+    bodies = _load(cfg.embeddings_dir, "body_embeddings.npy")
 
     rows_by_track: dict[Key, dict[str, Any]] = {}
     for shot in conditional["shots"]:
@@ -281,7 +281,7 @@ def run(cfg: Config) -> dict[str, Any]:
     )
     across_merges = len(after_within) - len(final)
 
-    # Abstained tracks are people too - the identikit must tolerate singletons - they are simply never candidates for a link, and say so.
+    # Abstained tracks are people too - downstream must tolerate singletons - they are simply never candidates for a link, and say so.
     everyone = final + abstained
     everyone.sort(key=lambda u: (min(k[0] for k in u["keys"]), u["keys"][0][1]))
 
@@ -348,7 +348,7 @@ def run(cfg: Config) -> dict[str, Any]:
         ),
         "persons": persons,
     }
-    (cfg.out_root / "consolidated.json").write_text(
+    (cfg.json_dir / "consolidated.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "persons"}

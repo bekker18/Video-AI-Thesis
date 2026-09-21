@@ -74,8 +74,8 @@ class TrackerArgs:
     with_reid: bool = False
 
 
-def _read(out_root: Path, name: str, produced_by: str) -> dict[str, Any]:
-    path = out_root / name
+def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
+    path = json_dir / name
     if not path.exists():
         raise RuntimeError(f"missing {path}; run {produced_by} first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -134,7 +134,7 @@ def _source(
     if cfg.frame_source == "video":
         return _from_video(cfg.video, wanted)
 
-    meta = _read(cfg.out_root, "sampling.json", "01-sampling")
+    meta = _read(cfg.json_dir, "sampling.json", "01-sampling")
     if int(meta["stride"]) != 1:
         raise RuntimeError(
             "01-sampling was run with --fps; its frames are not one-to-one"
@@ -335,7 +335,7 @@ def _score_pool(pool: list[dict[str, Any]]) -> None:
 
 
 def _objects(seen: list[tuple[int, dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Temporal union rather than identity: the identikit consumes object classes and how
+    """Temporal union rather than identity: downstream consumes object classes and how
     long they last, so per-class extent is enough without stable object ids."""
     union: dict[str, dict[str, Any]] = {}
     per_frame: dict[tuple[str, int], int] = {}
@@ -404,8 +404,8 @@ def run(cfg: Config) -> dict[str, Any]:
     from ultralytics import RTDETR, YOLO
 
     device = _device(cfg.device)
-    segmentation = _read(cfg.out_root, "segmentation.json", "02-segmentation")
-    routing = _read(cfg.out_root, "routing.json", "04-router")
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    routing = _read(cfg.json_dir, "routing.json", "04-router")
     fps = float(segmentation["fps"])
     frame_count = int(segmentation["frame_count"])
 
@@ -628,7 +628,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "note": "track ids are scoped to one shot; the key is (shot, track_id)",
         "shots": shots,
     }
-    (cfg.out_root / "tracks.json").write_text(
+    (cfg.json_dir / "tracks.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "shots"}

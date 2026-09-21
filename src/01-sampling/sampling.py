@@ -83,7 +83,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "sampled_fps": round(source_fps / stride, 3) if source_fps else 0.0,
         "image_format": cfg.image_format,
     }
-    (cfg.out_root / "sampling.json").write_text(
+    (cfg.json_dir / "sampling.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return meta

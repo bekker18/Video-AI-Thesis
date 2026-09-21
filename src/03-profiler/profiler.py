@@ -42,8 +42,8 @@ def _device(name: str) -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _read_segmentation(out_root: Path) -> dict[str, Any]:
-    path = out_root / "segmentation.json"
+def _read_segmentation(json_dir: Path) -> dict[str, Any]:
+    path = json_dir / "segmentation.json"
     if not path.exists():
         raise RuntimeError(f"missing {path}; run 02-segmentation first")
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
@@ -190,7 +190,7 @@ def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def run(cfg: Config) -> dict[str, Any]:
-    segmentation = _read_segmentation(cfg.out_root)
+    segmentation = _read_segmentation(cfg.json_dir)
     device = _device(cfg.device)
 
     weights = download_models.detector(STAGE, cfg.detector)
@@ -277,7 +277,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "object_totals": dict(sorted(every_class.items(), key=lambda kv: -kv[1])),
         "shots": shots,
     }
-    (cfg.out_root / "profile.json").write_text(
+    (cfg.json_dir / "profile.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "shots"}
