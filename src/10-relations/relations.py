@@ -1,7 +1,7 @@
-"""10-fusion: bind experts onto entities and compute the relations between them.
+"""10-relations: compute the relations between the people 09 resolved.
 
-09 produced the nodes: one record per global person. This produces the edges, which are the
-facts no single person's record can hold - who attends whom, whose affect moves together,
+09 produced the nodes: one record per global person. This produces the edges only, which are
+the facts no single person's record can hold - who attends whom, whose affect moves together,
 who stands where relative to whom. Every edge carries the frames and sample counts behind it,
 so a relation can be argued with rather than only read.
 
@@ -27,7 +27,7 @@ import numpy as np
 
 from config import Config
 
-STAGE = "10-fusion"
+STAGE = "10-relations"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
@@ -237,36 +237,12 @@ def run(cfg: Config) -> dict[str, Any]:
             for frame in rows.get(key, {}):
                 segment_of[pid][frame] = key[0]
 
-    entities: list[dict[str, Any]] = []
-    for person in aggregated["persons"]:
-        pid = int(person["person_id"])
-        # 06 clamps a face to its body box, so this validates the binding rather than performing it:
-        # face and body already share one track id.
-        escaped = sum(
-            1
-            for r in person_rows[pid].values()
-            if r["face"] and not _overlaps(r["face"], r["body"])
-        )
-        emotion = person.get("emotion") or {}
-        entities.append(
-            {
-                "person_id": pid,
-                "tracks": person["tracks"],
-                "segments": person["segments"],
-                "first_frame": person["first_frame"],
-                "last_frame": person["last_frame"],
-                "linked": person["linked"],
-                "abstained": person["abstained"],
-                "has_face": bool(person["support"]["face"]),
-                "has_pose": bool(person["support"]["pose"]),
-                "modal_emotion": emotion.get("modal"),
-                "demographics": person.get("demographics"),
-                "binding": {
-                    "face_frames": person["support"]["face"],
-                    "face_outside_body": escaped,
-                },
-            }
-        )
+    face_outside_body = sum(
+        1
+        for rows in person_rows.values()
+        for r in rows.values()
+        if r["face"] and not _overlaps(r["face"], r["body"])
+    )
 
     relations: list[dict[str, Any]] = []
     attention_edges = synchrony_edges = 0
@@ -340,7 +316,7 @@ def run(cfg: Config) -> dict[str, Any]:
     meta = {
         "video": segmentation["video"],
         "shot_count": len(shots),
-        "person_count": len(entities),
+        "person_count": len(aggregated["persons"]),
         "relation_count": len(relations),
         "attention_edges": attention_edges,
         "synchrony_edges": synchrony_edges,
@@ -349,17 +325,15 @@ def run(cfg: Config) -> dict[str, Any]:
         ),
         "attention_degrees": cfg.attention_deg,
         "synchrony_min_samples": cfg.sync_min,
+        "face_outside_body": face_outside_body,
         "note": (
             "attention is head orientation, not gaze; synchrony abstains below the sample "
             "floor; relations are between global persons and may span segments"
         ),
-        "entities": entities,
         "relations": relations,
         "shots": shots,
     }
-    (cfg.json_dir / "fused.json").write_text(
+    (cfg.json_dir / "relations.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
-    return {
-        k: v for k, v in meta.items() if k not in {"entities", "relations", "shots"}
-    }
+    return {k: v for k, v in meta.items() if k not in {"relations", "shots"}}

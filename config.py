@@ -73,19 +73,19 @@ class Config:
     blendshapes: int  # blendshape coefficients kept per sample
     attributes: int  # zero-shot attributes kept per crop
 
-    # 08-consolidation
-    consol_face_within: float  # face cosine a link needs inside a segment
-    consol_face_across: float  # face cosine a link needs across segments
-    consol_body_within: float  # body cosine a link needs inside a segment
-    consol_body_across: float  # body cosine a link needs across segments
-    consol_min_area: int  # crop pixel area below which a descriptor is not trusted
-    consol_min_front: float  # frontality floor on a face crop
+    # 08-identity
+    identity_face_within: float  # face cosine a link needs inside a segment
+    identity_face_across: float  # face cosine a link needs across segments
+    identity_body_within: float  # body cosine a link needs inside a segment
+    identity_body_across: float  # body cosine a link needs across segments
+    identity_min_area: int  # crop pixel area below which a descriptor is not trusted
+    identity_min_front: float  # frontality floor on a face crop
 
     # 09-aggregation
     agg_top: int  # labels kept per distribution
     pose_vis: float  # visibility a joint must reach to count
 
-    # 10-fusion
+    # 10-relations
     attention_deg: float  # cone width for "attends to"
     sync_min: int  # shared samples a synchrony edge needs
 

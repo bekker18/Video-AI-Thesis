@@ -23,9 +23,9 @@ STAGES = [
     "05-global-experts",
     "06-detection-tracking",
     "07-conditional-experts",
-    "08-consolidation",
+    "08-identity",
     "09-aggregation",
-    "10-fusion",
+    "10-relations",
 ]
 
 
@@ -168,37 +168,37 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument(
-        "--consol-face-within",
+        "--identity-face-within",
         type=float,
         default=0.55,
         help="face cosine a link needs inside a segment",
     )
     p.add_argument(
-        "--consol-face-across",
+        "--identity-face-across",
         type=float,
         default=0.45,
         help="face cosine a link needs across segments",
     )
     p.add_argument(
-        "--consol-body-within",
+        "--identity-body-within",
         type=float,
         default=0.70,
         help="body cosine a link needs inside a segment",
     )
     p.add_argument(
-        "--consol-body-across",
+        "--identity-body-across",
         type=float,
         default=0.60,
         help="body cosine a link needs across segments",
     )
     p.add_argument(
-        "--consol-min-area",
+        "--identity-min-area",
         type=int,
         default=1600,
         help="crop pixel area below which a descriptor is not trusted",
     )
     p.add_argument(
-        "--consol-min-front",
+        "--identity-min-front",
         type=float,
         default=0.15,
         help="frontality a face crop must reach to contribute a descriptor",
@@ -286,12 +286,12 @@ def main() -> None:
             series_stride=args.series_stride,
             blendshapes=args.blendshapes,
             attributes=args.attributes,
-            consol_face_within=args.consol_face_within,
-            consol_face_across=args.consol_face_across,
-            consol_body_within=args.consol_body_within,
-            consol_body_across=args.consol_body_across,
-            consol_min_area=args.consol_min_area,
-            consol_min_front=args.consol_min_front,
+            identity_face_within=args.identity_face_within,
+            identity_face_across=args.identity_face_across,
+            identity_body_within=args.identity_body_within,
+            identity_body_across=args.identity_body_across,
+            identity_min_area=args.identity_min_area,
+            identity_min_front=args.identity_min_front,
             agg_top=args.agg_top,
             pose_vis=args.pose_vis,
             attention_deg=args.attention_deg,

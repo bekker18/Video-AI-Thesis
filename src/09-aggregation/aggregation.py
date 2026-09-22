@@ -7,7 +7,7 @@ the only key was (segment, track_id) and the same person in two segments was two
 
 Every statistic is computed once, from the raw samples, over whole people.
 Pooling 08's summaries instead would have been exact for means and variances and wrong for medians,
-MADs and modal agreement, which is the argument that put consolidation ahead of this stage.
+MADs and modal agreement, which is the argument that put identity resolution ahead of this stage.
 
 Every statistic carries its support count, and variance is null below two samples rather than
 zero - most supports are still small, and saying so is the point.
@@ -320,7 +320,7 @@ def run(cfg: Config) -> dict[str, Any]:
     tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
     conditional = _read(cfg.json_dir, "conditional.json", "07-conditional-experts")
     global_meta = _read(cfg.json_dir, "global.json", "05-global-experts")
-    consolidated = _read(cfg.json_dir, "consolidated.json", "08-consolidation")
+    identity = _read(cfg.json_dir, "identity.json", "08-identity")
 
     fps = float(segmentation["fps"])
     gates = {int(s["index"]): sorted(s["experts"]) for s in routing["shots"]}
@@ -341,7 +341,7 @@ def run(cfg: Config) -> dict[str, Any]:
 
     persons: list[dict[str, Any]] = []
     thin = 0
-    for person in consolidated["persons"]:
+    for person in identity["persons"]:
         keys = [(int(t["segment"]), int(t["track_id"])) for t in person["tracks"]]
         present = [k for k in keys if k in spans]
         if not present:
