@@ -1,7 +1,7 @@
 """Renders the output of 06, 07, 08 and 10 back over the source video.
 
 python3 preview.py messi
-python3 preview.py messi --views fusion
+python3 preview.py messi --views relations
 
 """
 
@@ -441,26 +441,28 @@ def _conditional_view(root: Path) -> Draw:
     return draw
 
 
-# Fusion
+# Relations
 
 
-def _person_tracks(fused: dict[str, Any]) -> dict[int, list[tuple[int, int]]]:
+def _person_tracks(aggregated: dict[str, Any]) -> dict[int, list[tuple[int, int]]]:
+    """09 owns the person records; 10 writes edges only."""
     return {
-        int(e["person_id"]): [
-            (int(t["segment"]), int(t["track_id"])) for t in e["tracks"]
+        int(p["person_id"]): [
+            (int(t["segment"]), int(t["track_id"])) for t in p["tracks"]
         ]
-        for e in fused["entities"]
+        for p in aggregated["persons"]
     }
 
 
-def _fusion_view(root: Path) -> Draw:
+def _relations_view(root: Path) -> Draw:
     tracks = _load(root, "tracks.json", "06-detection-tracking")
-    fused = _load(root, "fused.json", "10-fusion")
+    relations = _load(root, "relations.json", "10-relations")
+    aggregated = _load(root, "aggregated.json", "09-aggregation")
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
-    owned = _person_tracks(fused)
+    owned = _person_tracks(aggregated)
     here_in = {
-        int(s["index"]): [int(p) for p in s["person_ids"]] for s in fused["shots"]
+        int(s["index"]): [int(p) for p in s["person_ids"]] for s in relations["shots"]
     }
 
     def row_at(pid: int, index: int) -> dict[str, Any] | None:
@@ -481,7 +483,7 @@ def _fusion_view(root: Path) -> Draw:
         shown: list[tuple[dict[str, Any], float, float]] = []
 
         # Relations are video-scoped now, so a pair is drawn wherever both are on screen.
-        for relation in fused["relations"]:
+        for relation in relations["relations"]:
             a = anchor(int(relation["a"]), index)
             b = anchor(int(relation["b"]), index)
             if a is None or b is None:
@@ -559,16 +561,16 @@ def _fusion_view(root: Path) -> Draw:
     return draw
 
 
-# Consolidation
+# Identity
 
 
-def _consolidation_view(root: Path) -> Draw:
+def _identity_view(root: Path) -> Draw:
     """The same boxes as the tracks view, labelled with 08's person id instead of 06's
     track id. Rendered side by side with tracks_preview.mp4 it shows what was merged and
     what was left alone, which is the only check on this stage that does not need a
     ground-truth annotation."""
     tracks = _load(root, "tracks.json", "06-detection-tracking")
-    con = _load(root, "consolidated.json", "08-consolidation")
+    con = _load(root, "identity.json", "08-identity")
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
 
@@ -637,8 +639,8 @@ def _consolidation_view(root: Path) -> Draw:
 VIEWS: dict[str, tuple[Callable[[Path], Draw], str]] = {
     "tracks": (_tracks_view, "06-detection-tracking"),
     "conditional": (_conditional_view, "07-conditional-experts"),
-    "consolidation": (_consolidation_view, "08-consolidation"),
-    "fusion": (_fusion_view, "10-fusion"),
+    "identity": (_identity_view, "08-identity"),
+    "relations": (_relations_view, "10-relations"),
 }
 
 

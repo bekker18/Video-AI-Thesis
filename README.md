@@ -81,12 +81,12 @@ tracks/          best crops per track  (06)
 | `--series-stride 2`         | `2`            | observed rows between series samples in 07                    |
 | `--blendshapes 10`          | `10`           | blendshape coefficients kept per sample                       |
 | `--attributes 8`            | `8`            | zero-shot face attributes kept per crop                       |
-| `--consol-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                     |
-| `--consol-face-across 0.45` | `0.45`         | face cosine a link needs across segments                      |
-| `--consol-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                     |
-| `--consol-body-across 0.60` | `0.60`         | body cosine a link needs across segments                      |
-| `--consol-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted       |
-| `--consol-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor       |
+| `--identity-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                     |
+| `--identity-face-across 0.45` | `0.45`         | face cosine a link needs across segments                      |
+| `--identity-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                     |
+| `--identity-body-across 0.60` | `0.60`         | body cosine a link needs across segments                      |
+| `--identity-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted       |
+| `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor       |
 | `--agg-top 10`              | `10`           | labels kept per distribution in 09                            |
 | `--pose-vis 0.5`            | `0.5`          | visibility a joint must reach to count in 09                  |
 | `--attention-deg 30`        | `30`           | cone width within which a head counts as attending someone    |
@@ -101,7 +101,7 @@ Draws what 06, 07, 08 and 10 produced back over the source video, for inspection
 docker compose run --rm --entrypoint python3 pipeline preview.py messi
 
 # just one
-docker compose run --rm --entrypoint python3 pipeline preview.py messi --views fusion
+docker compose run --rm --entrypoint python3 pipeline preview.py messi --views relations
 ```
 
 Writes `data/processed/<video>/previews/<view>_preview.mp4`.
@@ -110,8 +110,8 @@ Writes `data/processed/<video>/previews/<view>_preview.mp4`.
 | --------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `tracks`        | 06 — person boxes, solid where detected and dashed where interpolated, faces in white, and the frames chosen as crops |
 | `conditional`   | 07 — pose skeleton, head-pose axes, emotion with valence/arousal, recognised text                                     |
-| `consolidation` | 08 — global person ids over the same boxes as`tracks`, so what merged is visible against it                           |
-| `fusion`        | 10 — the relation graph: amber attends, green mutual, cyan dashed synchrony                                           |
+| `identity`      | 08 — global person ids over the same boxes as`tracks`, so what merged is visible against it                           |
+| `relations`     | 10 — the relation graph: amber attends, green mutual, cyan dashed synchrony                                           |
 
 ## Download model weights
 

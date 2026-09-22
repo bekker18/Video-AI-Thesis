@@ -9,7 +9,7 @@ the series 09 takes variance over. Expensive, slow-moving ones (face and body em
 gender, attributes) run on the handful of ranked crops 06 already selected.
 Nothing runs on an interpolated row - those are position estimates, not observations.
 
-The two embeddings are what 08-consolidation clusters into global person ids.
+The two embeddings are what 08-identity clusters into global person ids.
 They are not interchangeable: ArcFace identifies a person and reaches a minority of tracks,
 body appearance reaches nearly all of them and identifies an outfit under one lighting.
 """
@@ -299,7 +299,7 @@ def _embed_face(session: Any, aligned: Array) -> Array:
 
 
 def _embed_bodies(session: Any, crops: list[Array]) -> Array:
-    """YouTu ReID over 06's body crops. This is the descriptor 08-consolidation actually runs on:
+    """YouTu ReID over 06's body crops. This is the descriptor 08-identity actually runs on:
     a face embedding exists for a minority of tracks, a body crop for nearly all."""
     mean = np.array([0.485, 0.456, 0.406], np.float32)
     std = np.array([0.229, 0.224, 0.225], np.float32)

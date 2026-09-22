@@ -1,4 +1,4 @@
-"""08-consolidation: resolve segment-local tracks into global person ids.
+"""08-identity: resolve segment-local tracks into global person ids.
 
 Identity is resolved at three widening scopes along the pipeline: presence flags at 03,
 segment-local track ids at 06, and global person ids here. This is the main resolver,
@@ -30,7 +30,7 @@ import numpy as np
 
 from config import Config
 
-STAGE = "08-consolidation"
+STAGE = "08-identity"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
@@ -64,11 +64,11 @@ def _usable(crop: dict[str, Any], cfg: Config, kind: str) -> bool:
     in one clip discards every crop in another. Area is pixels and frontality is a normalised
     ratio; both mean the same thing in every clip.
     """
-    if float(crop["area"]) < cfg.consol_min_area:
+    if float(crop["area"]) < cfg.identity_min_area:
         return False
     if kind == "face":
         frontality = crop["frontality"]
-        if frontality is None or float(frontality) < cfg.consol_min_front:
+        if frontality is None or float(frontality) < cfg.identity_min_front:
             return False
     return True
 
@@ -260,7 +260,7 @@ def run(cfg: Config) -> dict[str, Any]:
         if not (units[i]["frames"] & units[j]["frames"])
     ]
     after_within = _cluster(
-        units, within_pairs, cfg.consol_face_within, cfg.consol_body_within
+        units, within_pairs, cfg.identity_face_within, cfg.identity_body_within
     )
     within_merges = len(units) - len(after_within)
 
@@ -277,7 +277,7 @@ def run(cfg: Config) -> dict[str, Any]:
         and not (after_within[i]["frames"] & after_within[j]["frames"])
     ]
     final = _cluster(
-        after_within, across_pairs, cfg.consol_face_across, cfg.consol_body_across
+        after_within, across_pairs, cfg.identity_face_across, cfg.identity_body_across
     )
     across_merges = len(after_within) - len(final)
 
@@ -334,12 +334,12 @@ def run(cfg: Config) -> dict[str, Any]:
         "face_descriptors": sum(1 for u in units if u["face"] is not None),
         "body_descriptors": sum(1 for u in units if u["body"] is not None),
         "thresholds": {
-            "face_within": cfg.consol_face_within,
-            "face_across": cfg.consol_face_across,
-            "body_within": cfg.consol_body_within,
-            "body_across": cfg.consol_body_across,
-            "min_area": cfg.consol_min_area,
-            "min_frontality": cfg.consol_min_front,
+            "face_within": cfg.identity_face_within,
+            "face_across": cfg.identity_face_across,
+            "body_within": cfg.identity_body_within,
+            "body_across": cfg.identity_body_across,
+            "min_area": cfg.identity_min_area,
+            "min_frontality": cfg.identity_min_front,
         },
         "source": source,
         "note": (
@@ -348,7 +348,7 @@ def run(cfg: Config) -> dict[str, Any]:
         ),
         "persons": persons,
     }
-    (cfg.json_dir / "consolidated.json").write_text(
+    (cfg.json_dir / "identity.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
     return {k: v for k, v in meta.items() if k != "persons"}
