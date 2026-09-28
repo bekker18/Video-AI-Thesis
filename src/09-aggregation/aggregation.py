@@ -1,17 +1,5 @@
-"""09-aggregation: collapse per-frame and per-sample outputs into per-person records.
-
-Aggregates at two scopes: one record per global person from 08, over every track that person
-was resolved from, and one record per segment carrying the plastic timeline, text and object extents.
-08 having run first is what makes the person scope available - before it,
-the only key was (segment, track_id) and the same person in two segments was two strangers.
-
-Every statistic is computed once, from the raw samples, over whole people.
-Pooling 08's summaries instead would have been exact for means and variances and wrong for medians,
-MADs and modal agreement, which is the argument that put identity resolution ahead of this stage.
-
-Every statistic carries its support count, and variance is null below two samples rather than
-zero - most supports are still small, and saying so is the point.
-"""
+"""09-aggregation: per-person records over 08's global persons, from raw samples, and
+per-segment records of the plastic timeline, text and objects. Every statistic carries its n."""
 
 from __future__ import annotations
 
@@ -51,8 +39,7 @@ def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
 
 
 def _stats(values: list[float]) -> dict[str, Any]:
-    """Mean and variance for the dynamism signal, median and MAD because one bad crop moves
-    a mean and not a median. Variance needs two samples; below that it is null, not zero."""
+    """Mean and variance, plus median and MAD for robustness; variance is null below two samples."""
     n = len(values)
     if not n:
         return {"n": 0}
@@ -73,8 +60,7 @@ def _stats(values: list[float]) -> dict[str, Any]:
 def _distribution(
     rows: list[dict[str, float]], labels: tuple[str, ...]
 ) -> dict[str, Any]:
-    """Mean of the per-sample probability vectors, not a vote. The modal label plus
-    the fraction of samples that agreed with it, so disagreement stays visible."""
+    """Mean probability vector, its modal label, and the share of samples that agreed with it."""
     if not rows:
         return {"n": 0}
     matrix = np.asarray([[float(r.get(k, 0.0)) for k in labels] for r in rows])
@@ -90,8 +76,7 @@ def _distribution(
 
 
 def _labelled(entries: list[list[dict[str, Any]]], top: int) -> list[dict[str, Any]]:
-    """Sparse label lists (tags, attributes, scenes) aggregated by mean score
-    and how many of the sources actually offered the label."""
+    """Label lists ranked by how many sources offered each label, then by mean score."""
     totals: dict[str, list[float]] = {}
     for row in entries:
         for item in row:
@@ -106,12 +91,7 @@ def _labelled(entries: list[list[dict[str, Any]]], top: int) -> list[dict[str, A
 
 
 def _pose_summary(samples: list[dict[str, Any]], floor: float) -> dict[str, Any]:
-    """Movement is measured in crop-normalised coordinates, so it reads as change of posture
-    rather than of camera distance. Joints predicted outside the crop are dropped first.
-
-    A person's samples now span several segments, and the displacement between the last sample
-    of one and the first of the next is a cut, not a movement. Consecutive pairs are taken only inside a segment.
-    """
+    """Crop-normalised movement between consecutive samples, never across a cut."""
     usable: list[tuple[int, int, Array, Array]] = []
     for sample in samples:
         pose = sample.get("pose")
@@ -156,19 +136,54 @@ def _pose_summary(samples: list[dict[str, Any]], floor: float) -> dict[str, Any]
     }
 
 
+def _affect(emotions: list[dict[str, Any]]) -> dict[str, Any]:
+    if not emotions:
+        return {}
+    labels = tuple(sorted(emotions[0]["scores"]))
+    out: dict[str, Any] = {"emotion": _distribution([e["scores"] for e in emotions], labels)}
+    for axis in ("valence", "arousal"):
+        present = [float(e[axis]) for e in emotions if e.get(axis) is not None]
+        if present:
+            out[axis] = _stats(present)
+    return out
+
+
+def _by_segment(
+    series: list[dict[str, Any]],
+    spans: list[tuple[int, dict[str, Any]]],
+    fps: float,
+    cfg: Config,
+) -> list[dict[str, Any]]:
+    """The person's affect and movement per segment, so a change across a cut is not pooled away."""
+    out: list[dict[str, Any]] = []
+    for segment in sorted({seg for seg, _ in spans}):
+        frames = sum(int(s["frame_count"]) for seg, s in spans if seg == segment)
+        mine = [s for s in series if int(s["segment"]) == segment]
+        entry: dict[str, Any] = {
+            "segment": segment,
+            "duration_seconds": round(frames / fps, 3) if fps else 0.0,
+            "series": len(mine),
+            **_affect([s["emotion"] for s in mine if "emotion" in s]),
+        }
+        movement = _pose_summary(mine, cfg.pose_vis).get("movement", {"n": 0})
+        if movement["n"]:
+            entry["movement"] = movement
+        out.append(entry)
+    return out
+
+
 def _person(
     person: dict[str, Any],
     series: list[dict[str, Any]],
-    spans: list[dict[str, Any]],
+    spans: list[tuple[int, dict[str, Any]]],
     attrs: dict[str, list[Any]],
     fps: float,
     cfg: Config,
 ) -> dict[str, Any]:
     face = [s for s in series if "head_pose" in s]
     emotions = [s["emotion"] for s in series if "emotion" in s]
-    # Summed, not last minus first: a person's segments are separated by everything that happened between them,
-    # and that is not time they were on screen.
-    frames = sum(int(s["frame_count"]) for s in spans)
+    # Summed, not last minus first: the time between a person's segments is not screen time.
+    frames = sum(int(s["frame_count"]) for _, s in spans)
 
     record: dict[str, Any] = {
         "person_id": person["person_id"],
@@ -176,8 +191,8 @@ def _person(
         "segments": person["segments"],
         "linked": person["linked"],
         "abstained": person["abstained"],
-        "first_frame": min(int(s["first_frame"]) for s in spans) if spans else None,
-        "last_frame": max(int(s["last_frame"]) for s in spans) if spans else None,
+        "first_frame": min(int(s["first_frame"]) for _, s in spans) if spans else None,
+        "last_frame": max(int(s["last_frame"]) for _, s in spans) if spans else None,
         "duration_frames": frames,
         "duration_seconds": round(frames / fps, 3) if fps else 0.0,
         "support": {
@@ -188,7 +203,7 @@ def _person(
             "pose": sum(1 for s in series if "pose" in s),
             "crops": len(attrs.get("embedding_rows", [])),
             "body_crops": len(attrs.get("body_rows", [])),
-            "observed_frames": sum(int(s["observed_frames"]) for s in spans),
+            "observed_frames": sum(int(s["observed_frames"]) for _, s in spans),
         },
     }
 
@@ -206,17 +221,12 @@ def _person(
             name: _stats(values) for name, values in ranked[: cfg.agg_top]
         }
 
-    if emotions:
-        labels = tuple(sorted(emotions[0]["scores"]))
-        record["emotion"] = _distribution([e["scores"] for e in emotions], labels)
-        for axis in ("valence", "arousal"):
-            present = [float(e[axis]) for e in emotions if e.get(axis) is not None]
-            if present:
-                record[axis] = _stats(present)
+    record.update(_affect(emotions))
 
     pose = _pose_summary(series, cfg.pose_vis)
     if pose["n"]:
         record["pose"] = pose
+    record["by_segment"] = _by_segment(series, spans, fps, cfg)
 
     if attrs.get("gender_age"):
         ages = [float(g["age"]) for g in attrs["gender_age"]]
@@ -296,8 +306,7 @@ def _plastic(keyframes: list[dict[str, Any]], cfg: Config) -> dict[str, Any]:
 
 
 def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """The same caption is detected on every keyframe of a shot, so readings are deduplicated
-    and carry the range they were seen over."""
+    """Readings deduplicated per shot, each with the frame range it was seen over."""
     grouped: dict[str, list[int]] = {}
     for entry in entries:
         grouped.setdefault(str(entry["text"]), []).append(int(entry["frame"]))
@@ -347,8 +356,7 @@ def run(cfg: Config) -> dict[str, Any]:
         if not present:
             continue
 
-        # Every sample carries the segment it came from: the statistics are order-free,
-        # but pose movement is not, and neither is anything a later stage may want to split back.
+        # Samples keep their segment: movement and the per-segment breakdown need it.
         series: list[dict[str, Any]] = []
         attrs: dict[str, list[Any]] = {
             "embedding_rows": [],
@@ -365,7 +373,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 attrs.setdefault(field, []).extend(values)
         series.sort(key=lambda s: (int(s["segment"]), int(s["frame"])))
 
-        record = _person(person, series, [spans[k] for k in present], attrs, fps, cfg)
+        record = _person(person, series, [(k[0], spans[k]) for k in present], attrs, fps, cfg)
         if record["support"]["series"] < 2:
             thin += 1
         persons.append(record)

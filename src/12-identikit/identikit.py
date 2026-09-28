@@ -40,7 +40,6 @@ PENDING: dict[str, str] = {
     "plastic.segments[].centralities": "09 does not carry 05's panoptic boxes forward",
     "plastic.segments[].depth": "05 writes depth maps that no stage reads back",
     "figurative.segments[].indoor_outdoor": "Places365's indoor/outdoor labels are not fetched",
-    "figurative.persons[].by_segment": "09 pools a person's samples across segments",
     "enunciative.persons[].gaze": "no gaze model is installed",
     "enunciative.segments[].camera_distance": "05 writes depth maps that no stage reads back",
     "enunciative.segments[].face_background_ratio": "09 does not carry face box areas forward",
@@ -69,6 +68,7 @@ PROVENANCE: dict[str, str] = {
     "figurative.persons[].valence": "07 HSEmotion EfficientNet-B0, via 09",
     "figurative.persons[].arousal": "07 HSEmotion EfficientNet-B0, via 09",
     "figurative.persons[].movement": "07 MediaPipe PoseLandmarker, via 09",
+    "figurative.persons[].by_segment": "07 HSEmotion and PoseLandmarker samples split by segment, via 09",
     "enunciative.persons[].head_pose": "07 MediaPipe FaceLandmarker, via 09",
     "enunciative.relations": "10, from 06 boxes and 07 head pose and affect",
     "enunciative.segments[].visible_at_once": "03 YOLO11 person count over keyframes",
@@ -241,7 +241,19 @@ def _person(
         "valence": _measure(person.get("valence")),
         "arousal": _measure(person.get("arousal")),
         "movement": _measure((person.get("pose") or {}).get("movement")),
-        "by_segment": None,
+        "by_segment": [
+            {
+                "segment": s["segment"],
+                "seconds": s["duration_seconds"],
+                "emotion": {k: s["emotion"][k] for k in ("modal", "agreement", "n")}
+                if (s.get("emotion") or {}).get("n")
+                else None,
+                "valence": _measure(s.get("valence")),
+                "arousal": _measure(s.get("arousal")),
+                "movement": _measure(s.get("movement")),
+            }
+            for s in person.get("by_segment") or []
+        ],
         "support": person["support"],
         "confidence": "good" if series >= 10 else ("moderate" if series >= 2 else "thin"),
     }
@@ -406,6 +418,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "summary": {
             "duration_s": round(duration, 3),
             "frames": frames,
+            "fps": round(frames / duration, 2) if duration else None,
             "segments": len(shots),
             "persons": {
                 "resolved": len(persons),
@@ -417,8 +430,15 @@ def run(cfg: Config) -> dict[str, Any]:
             "relations": {
                 "co_present": relations["relation_count"],
                 "with_evidence": len(kept),
+                "attention": relations["attention_edges"],
+                "mutual": sum(1 for r in relations["relations"] if r["attention"]["mutual"]),
                 "synchrony": relations["synchrony_edges"],
+                "cross_segment": relations["cross_segment_relations"],
                 "attention_floor": cfg.identikit_attention,
+            },
+            "text": {
+                "readings": sum(int(t["n"]) for s in shots for t in s["text"]),
+                "distinct": sum(len(s["text"]) for s in shots),
             },
         },
         "timeline": {
