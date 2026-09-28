@@ -1,12 +1,5 @@
-"""05-global-experts: the plastic, always-on branch.
-
-Every expert here is person-independent and depends on no identity information, which is
-why 04-router leaves them ungated. They run on the keyframes 02 selected.
-
-Models are loaded one at a time and freed, so six of them never sit on the GPU at once.
-Panoptic segment indices are per-keyframe geometry only: they are never matched across
-frames and must not be read as identity, which comes solely from the gated branch.
-"""
+"""05-global-experts: the plastic, always-on branch, run on 02's keyframes. Models load one at
+a time; panoptic segment indices are per-keyframe geometry, never identity."""
 
 from __future__ import annotations
 
@@ -22,11 +15,6 @@ from config import Config
 
 STAGE = "05-global-experts"
 DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
-SEMANTIC_MODELS = {
-    "segformer-b0": "nvidia/segformer-b0-finetuned-ade-512-512",
-    "segformer-b1": "nvidia/segformer-b1-finetuned-ade-512-512",
-    "segformer-b2": "nvidia/segformer-b2-finetuned-ade-512-512",
-}
 PANOPTIC_MODEL = "facebook/mask2former-swin-tiny-coco-panoptic"
 CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"
 
@@ -172,14 +160,7 @@ def _depth(images: list[Array], device: str, cache: Path, batch: int) -> list[Ar
 
 
 def _normals(depth: Array) -> Array:
-    """Surface normals by unprojecting the depth map into camera space and taking the cross
-    product of neighbouring surface vectors.
-
-    Depth Anything outputs relative inverse depth (disparity), so this converts to a
-    pseudo-distance first and assumes a focal length. Taking gradients of the raw disparity
-    instead yields a map dominated by depth discontinuities, with flat surfaces reading as
-    featureless - orientation only shows up once the unprojection is done.
-    """
+    """Cross product of neighbouring surface vectors, after unprojecting disparity to camera space."""
     span = depth.max() - depth.min()
     disparity = (depth - depth.min()) / span if span else np.zeros_like(depth)
     z = 1.0 / (disparity.astype(np.float32) + 0.25)  # bounded pseudo-distance
@@ -286,8 +267,7 @@ def _scene(
 def _tags(
     embeddings: Array, device: str, model_dir: Path, clip_cache: Path, top: int
 ) -> list[list[dict[str, Any]]]:
-    """Zero-shot against RAM's tag vocabulary, reusing the keyframe embeddings 02 saved.
-    No image is decoded and no vision forward pass runs here."""
+    """Zero-shot against RAM's tag vocabulary over 02's keyframe embeddings; no image is read."""
     import open_clip
     import torch
 
@@ -333,10 +313,12 @@ def _semantic(
     import torch
     from transformers import SegformerForSemanticSegmentation, SegformerImageProcessor
 
-    repo = SEMANTIC_MODELS[name]
-    processor: Any = SegformerImageProcessor.from_pretrained(repo, cache_dir=str(cache))
+    source = download_models.SEGFORMERS[name]
+    processor: Any = SegformerImageProcessor.from_pretrained(
+        source.repo, cache_dir=str(cache), revision=source.revision
+    )
     model: Any = SegformerForSemanticSegmentation.from_pretrained(
-        repo, cache_dir=str(cache)
+        source.repo, cache_dir=str(cache), revision=source.revision, use_safetensors=True
     )
     model = model.to(device).eval()
     names = {int(k): v for k, v in model.config.id2label.items()}
@@ -516,7 +498,7 @@ def run(cfg: Config) -> dict[str, Any]:
             "edges": "PiDiNet",
             "scene": "places365-resnet18",
             "tags": CLIP_MODEL,
-            "semantic": SEMANTIC_MODELS[cfg.seg_model],
+            "semantic": download_models.SEGFORMERS[cfg.seg_model].repo,
             "panoptic": PANOPTIC_MODEL,
         },
         "label_spaces": {"semantic": "ade20k", "panoptic": "coco_panoptic"},

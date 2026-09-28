@@ -26,6 +26,8 @@ STAGES = [
     "08-identity",
     "09-aggregation",
     "10-relations",
+    "11-caption",
+    "12-identikit",
 ]
 
 
@@ -34,7 +36,7 @@ class Stage(Protocol):
 
 
 def stage_path(name: str) -> Path:
-    """01-sampling -> src/01-sampling/sampling.py, 06-global-experts -> .../global_experts.py"""
+    """01-sampling -> src/01-sampling/sampling.py, 05-global-experts -> .../global_experts.py"""
     stem = name.split("-", 1)[1].replace("-", "_")
     return ROOT / "src" / name / f"{stem}.py"
 
@@ -97,8 +99,8 @@ def parse_args() -> argparse.Namespace:
 
     p.add_argument(
         "--detector",
-        default="yolo11s",
-        choices=["yolo11n", "yolo11s", "yolo11m", "rtdetr-l"],
+        default=download_models.DEFAULT_DETECTOR,
+        choices=list(download_models.DETECTORS),
     )
     p.add_argument("--det-conf", type=float, default=0.25)
     p.add_argument("--face-conf", type=float, default=0.6)
@@ -121,8 +123,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--expert-batch", type=int, default=8)
     p.add_argument(
         "--seg-model",
-        default="segformer-b1",
-        choices=["segformer-b0", "segformer-b1", "segformer-b2"],
+        default=download_models.DEFAULT_SEGFORMER,
+        choices=list(download_models.SEGFORMERS),
     )
     p.add_argument(
         "--seg-top", type=int, default=10, help="classes or segments kept per keyframe"
@@ -226,6 +228,34 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="shared affect samples a synchrony edge needs before it is computed",
     )
+
+    p.add_argument(
+        "--caption-model",
+        default=download_models.DEFAULT_CAPTIONER,
+        choices=list(download_models.CAPTIONERS),
+    )
+    p.add_argument(
+        "--caption-frames", type=int, default=8, help="keyframes shown to the captioner"
+    )
+    p.add_argument(
+        "--caption-size",
+        type=int,
+        default=448,
+        help="longest side of each keyframe given to the captioner",
+    )
+
+    p.add_argument(
+        "--identikit-attention",
+        type=float,
+        default=0.5,
+        help="attention share a relation needs before the identikit lists it",
+    )
+    p.add_argument(
+        "--identikit-labels",
+        type=int,
+        default=3,
+        help="labels kept per segment and per person in the identikit",
+    )
     return p.parse_args()
 
 
@@ -245,8 +275,7 @@ def main() -> None:
     out_root = ROOT / "data" / "processed" / video.stem
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Stages read their input from out_root, so any stage can run on its own
-    # as long as the previous one has already written its output.
+    # Stages read from out_root, so any one can rerun alone once its inputs exist.
     for name in sorted(args.stages, key=STAGES.index):
         cfg = Config(
             video=video,
@@ -296,6 +325,11 @@ def main() -> None:
             pose_vis=args.pose_vis,
             attention_deg=args.attention_deg,
             sync_min=args.sync_min,
+            caption_model=args.caption_model,
+            caption_frames=args.caption_frames,
+            caption_size=args.caption_size,
+            identikit_attention=args.identikit_attention,
+            identikit_labels=args.identikit_labels,
         )
         download_models.ensure(name)
         print(f"[{name}] start")
