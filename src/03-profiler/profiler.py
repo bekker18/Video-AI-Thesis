@@ -1,12 +1,5 @@
-"""03-profiler: cheap always-on detectors over each shot's keyframes, producing the
-presence flags 04-router branches on.
-
-One detector pass gives persons and objects. Faces are found only inside person boxes, so
-body presence and face presence stay distinct without a second full-frame inference. Text
-presence comes from PP-OCRv3's detection stage alone. Scene belongs to 05-global-experts,
-which runs a trained Places365 head; keeping a second answer here would only invite the
-two to disagree.
-"""
+"""03-profiler: cheap detectors over each shot's keyframes, producing the presence flags
+04-router branches on."""
 
 from __future__ import annotations
 
@@ -97,6 +90,18 @@ def _dedupe(
     return kept
 
 
+def _letterbox(crop: Array, size: int) -> tuple[Array, float]:
+    """Fixed-size input: setInputSize per crop makes YuNet return phantom faces."""
+    height, width = crop.shape[:2]
+    scale = min(size / width, size / height)
+    new_width, new_height = max(1, round(width * scale)), max(1, round(height * scale))
+    canvas: Array = np.zeros((size, size, 3), dtype=np.uint8)
+    canvas[:new_height, :new_width] = cv2.resize(
+        crop, (new_width, new_height), interpolation=cv2.INTER_LINEAR
+    )
+    return canvas, scale
+
+
 def _faces(
     detector: Any, image: Array, persons: list[dict[str, Any]], conf: float
 ) -> list[dict[str, Any]]:
@@ -111,9 +116,8 @@ def _faces(
         if x2 - x1 < 24 or y2 - y1 < 24:
             continue
 
-        crop = image[y1:y2, x1:x2]
-        detector.setInputSize((crop.shape[1], crop.shape[0]))
-        _, detections = detector.detect(crop)
+        canvas, scale = _letterbox(image[y1:y2, x1:x2], FACE_INPUT[0])
+        _, detections = detector.detect(canvas)
         if detections is None:
             continue
 
@@ -121,11 +125,21 @@ def _faces(
             score = float(row[14])
             if score < conf:
                 continue
-            fx, fy, fw, fh = (int(v) for v in row[:4])
+            raw = np.asarray(row[:4], dtype=np.float64)
+            if not bool(np.isfinite(raw).all()):  # YuNet can return inf
+                continue
+            fx, fy, fw, fh = (round(float(v) / scale) for v in raw)
+            if fw <= 0 or fh <= 0:
+                continue
             found.append(
                 {
                     "score": round(score, 3),
-                    "box": [x1 + fx, y1 + fy, x1 + fx + fw, y1 + fy + fh],
+                    "box": [
+                        min(max(x1 + fx, x1), x2),
+                        min(max(y1 + fy, y1), y2),
+                        min(max(x1 + fx + fw, x1), x2),
+                        min(max(y1 + fy + fh, y1), y2),
+                    ],
                 }
             )
     return _dedupe(found)
@@ -145,9 +159,7 @@ def _text(detector: Any, image: Array, conf: float) -> list[dict[str, Any]]:
 
 
 def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
-    """`flags` is the whole contract 04-router reads: four booleans, no class names. Class
-    identity stays in `counts` as a diagnostic, because a false positive there is what makes
-    a flag fire wrongly, and you cannot see that from the boolean alone."""
+    """`flags` is all 04-router reads; class names stay in `counts` as diagnostics."""
     total = max(1, len(keyframes))
     persons = [k["person_count"] for k in keyframes]
     faces = [k["face_count"] for k in keyframes]
@@ -181,7 +193,6 @@ def _summarise(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
             "face": round(sum(1 for f in faces if f) / total, 3),
             "text": round(text_hits / total, 3),
             "object": round(object_hits / total, 3),
-            # Per class, so a one-frame false positive is distinguishable from a real object.
             "objects": {
                 label: round(n / total, 3) for label, n in sorted(seen.items())
             },
@@ -201,7 +212,6 @@ def run(cfg: Config) -> dict[str, Any]:
     text_detector.setBinaryThreshold(0.3).setPolygonThreshold(cfg.text_conf)
     text_detector.setInputParams(1.0 / 255.0, TEXT_INPUT, TEXT_MEAN, True)
 
-    # Every keyframe of every shot goes through the detector in one batch.
     paths: list[Path] = []
     owners: list[int] = []
     for shot in segmentation["shots"]:
