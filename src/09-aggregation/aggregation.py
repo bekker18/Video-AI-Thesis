@@ -9,6 +9,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, TypeAlias
 
+import cv2
 import numpy as np
 
 from config import Config
@@ -323,6 +324,54 @@ def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _frame_size(cfg: Config, tracks_meta: dict[str, Any]) -> tuple[int, int]:
+    """The pixels 06's boxes are in: 01's frames if 06 read those, else one decoded frame."""
+    if tracks_meta.get("frame_source") == "frames":
+        sampling = _read(cfg.json_dir, "sampling.json", "01-sampling")
+        return int(sampling["frame_width"]), int(sampling["frame_height"])
+    capture = cv2.VideoCapture(str(cfg.video))
+    ok, frame = capture.read()
+    capture.release()
+    if not ok:
+        raise RuntimeError(f"cannot read a frame from {cfg.video}")
+    return int(frame.shape[1]), int(frame.shape[0])
+
+
+def _framing(shot: dict[str, Any], size: tuple[int, int]) -> dict[str, Any]:
+    """Per observed frame, the largest face and body as a share of frame height and the faces'
+    area against the rest of the frame; a frame without a face counts as zero."""
+    width, height = size
+    rows_at: dict[int, list[dict[str, Any]]] = {}
+    for track in shot.get("tracks", []):
+        for row in track["frames"]:
+            if not row["interpolated"]:
+                rows_at.setdefault(int(row["frame"]), []).append(row)
+
+    def tall(box: list[int]) -> float:
+        return max(0, min(height, box[3]) - max(0, box[1])) / height
+
+    def area(box: list[int]) -> int:
+        return max(0, min(width, box[2]) - max(0, box[0])) * max(0, min(height, box[3]) - max(0, box[1]))
+
+    face_height: list[float] = []
+    body_height: list[float] = []
+    face_background: list[float] = []
+    for frame in sorted(rows_at):
+        rows = rows_at[frame]
+        faces = [r["face"] for r in rows if r["face"]]
+        covered = sum(area(f) for f in faces)
+        face_height.append(max((tall(f) for f in faces), default=0.0))
+        body_height.append(max(tall(r["body"]) for r in rows))
+        face_background.append(covered / max(1, width * height - covered))
+    return {
+        "frames": len(rows_at),
+        "face_frames": sum(1 for h in face_height if h),
+        "face_height": _stats(face_height),
+        "body_height": _stats(body_height),
+        "face_background": _stats(face_background),
+    }
+
+
 def run(cfg: Config) -> dict[str, Any]:
     segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
     routing = _read(cfg.json_dir, "routing.json", "04-router")
@@ -332,6 +381,7 @@ def run(cfg: Config) -> dict[str, Any]:
     identity = _read(cfg.json_dir, "identity.json", "08-identity")
 
     fps = float(segmentation["fps"])
+    size = _frame_size(cfg, tracks_meta)
     gates = {int(s["index"]): sorted(s["experts"]) for s in routing["shots"]}
     spans = {
         (int(s["index"]), int(t["track_id"])): t
@@ -402,6 +452,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 "plastic": _plastic(by_shot.get(index, []), cfg),
                 "text": _text(shot["text"]),
                 "objects": source.get("objects", []),
+                "framing": _framing(source, size),
             }
         )
 
@@ -411,6 +462,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "person_records": len(persons),
         "thin_records": thin,
         "multi_segment_persons": sum(1 for p in persons if len(p["segments"]) > 1),
+        "frame_size": list(size),
         "pose_vis_floor": cfg.pose_vis,
         "top_k": cfg.agg_top,
         "note": (
