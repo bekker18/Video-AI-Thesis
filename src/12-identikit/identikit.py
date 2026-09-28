@@ -33,6 +33,17 @@ CONTRADICTS = {
 # Banded on how many 03 saw at once, not how many 08 followed: crowdedness describes the frame.
 CROWD = ((0, "none"), (1, "single"), (2, "couple"), (5, "group"))
 
+# Shot scale on the segment's median largest face and body height, as a share of frame height.
+# First match wins, else "extreme long"; the bands follow the usual shot sizes.
+SCALE: tuple[tuple[str, str, float], ...] = (
+    ("extreme close-up", "face_height", 0.75),
+    ("close-up", "face_height", 0.30),
+    ("medium", "face_height", 0.12),
+    ("medium", "body_height", 0.75),
+    ("long", "body_height", 0.25),
+)
+PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
+
 PENDING: dict[str, str] = {
     "plastic.video.grayscale": "05 does not compute it",
     "plastic.video.colour_histogram": "05 does not compute it",
@@ -41,9 +52,6 @@ PENDING: dict[str, str] = {
     "plastic.segments[].depth": "05 writes depth maps that no stage reads back",
     "figurative.segments[].indoor_outdoor": "Places365's indoor/outdoor labels are not fetched",
     "enunciative.persons[].gaze": "no gaze model is installed",
-    "enunciative.segments[].camera_distance": "05 writes depth maps that no stage reads back",
-    "enunciative.segments[].face_background_ratio": "09 does not carry face box areas forward",
-    "enunciative.segments[].portrait_scene": "follows from face_background_ratio",
 }
 
 EXCLUDED: dict[str, str] = {
@@ -73,6 +81,9 @@ PROVENANCE: dict[str, str] = {
     "enunciative.relations": "10, from 06 boxes and 07 head pose and affect",
     "enunciative.segments[].visible_at_once": "03 YOLO11 person count over keyframes",
     "enunciative.segments[].followed": "08 person ids, via 09",
+    "enunciative.segments[].camera_distance": "06 YuNet face and YOLO11 body boxes, via 09",
+    "enunciative.segments[].face_background_ratio": "06 YuNet face boxes, via 09",
+    "enunciative.segments[].portrait_scene": "face_background_ratio against PORTRAIT",
 }
 
 CAVEATS: tuple[str, ...] = (
@@ -82,6 +93,7 @@ CAVEATS: tuple[str, ...] = (
     "age and gender are a perceived estimate from one small model, not a property of a person",
     "text is read by a CRNN in ten-character chunks, so word boundaries are not real",
     "visible_at_once is the maximum over a segment's keyframes, so it is itself a lower bound",
+    "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
     "confidence is banded on time-series samples; crop-based fields carry their own n",
     "the caption is written by a VLM; `unsupported` lists objects it names that no detector found",
 )
@@ -267,6 +279,20 @@ def _head_pose(person: dict[str, Any]) -> dict[str, Any] | None:
     return {axis: _measure(pose.get(axis)) for axis in ("yaw", "pitch", "roll")}
 
 
+def _framing(framing: dict[str, Any]) -> dict[str, Any]:
+    """Null where nobody was followed: there is no one to frame."""
+    if not framing.get("frames"):
+        return {"camera_distance": None, "face_background_ratio": None, "portrait_scene": None}
+    medians = {k: float(framing[k]["median"]) for k in ("face_height", "body_height")}
+    scale = next((label for label, key, floor in SCALE if medians[key] >= floor), "extreme long")
+    ratio = float(framing["face_background"]["median"])
+    return {
+        "camera_distance": {"scale": scale, **medians, "frames": framing["frames"]},
+        "face_background_ratio": ratio,
+        "portrait_scene": "portrait" if ratio >= PORTRAIT else "scene",
+    }
+
+
 def _caption(json_dir: Path, shots: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
     """11 runs a VLM, so a missing or stale caption is a gap, not an error."""
     path = json_dir / "caption.json"
@@ -395,9 +421,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 "visible_at_once": at_once.get(index, 0),
                 "followed": followed,
                 "assessment": _assess(at_once.get(index, 0), followed),
-                "camera_distance": None,
-                "face_background_ratio": None,
-                "portrait_scene": None,
+                **_framing(shot.get("framing") or {}),
             }
         )
 
