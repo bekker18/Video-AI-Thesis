@@ -89,6 +89,15 @@ class Config:
     attention_deg: float  # cone width for "attends to"
     sync_min: int  # shared samples a synchrony edge needs
 
+    # 11-caption
+    caption_model: str  # qwen3-vl-2b | qwen3-vl-4b
+    caption_frames: int  # keyframes shown to the captioner
+    caption_size: int  # longest side of each keyframe given to the captioner
+
+    # 12-identikit
+    identikit_attention: float  # attention share a relation needs before it is listed
+    identikit_labels: int  # labels kept per segment and per person
+
     @property
     def json_dir(self) -> Path:
         return _subdir(self.out_root, JSON_DIR)

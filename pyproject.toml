@@ -17,7 +17,7 @@ dependencies = [
     "ffmpeg-python==0.2.0",
 
     # 05-global-experts
-    "transformers==4.46.3",
+    "transformers==4.57.6",  # 11-caption: Qwen3-VL needs >= 4.57
     "einops==0.8.0",
     "controlnet_aux==0.0.9",
 

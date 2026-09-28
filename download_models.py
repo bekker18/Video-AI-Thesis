@@ -28,6 +28,7 @@ INSIGHTFACE = "https://github.com/deepinsight/insightface/releases/download/v0.7
 class Model:
     repo: str
     filename: str | None = None  # a single file, or the whole snapshot when None
+    revision: str = "main"
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,21 @@ class Archive:
     members: tuple[str, ...]
 
 
+# Selectable by --seg-model. B1 and B2 ship only a pickle on main, which transformers will not
+# load under torch 2.5; the pinned revisions are the Hub's own safetensors conversions.
+SEGFORMERS: dict[str, Model] = {
+    "segformer-b0": Model("nvidia/segformer-b0-finetuned-ade-512-512"),
+    "segformer-b1": Model(
+        "nvidia/segformer-b1-finetuned-ade-512-512",
+        revision="97252cce3b3ef4a4e5c2599f043500ad49872d6c",
+    ),
+    "segformer-b2": Model(
+        "nvidia/segformer-b2-finetuned-ade-512-512",
+        revision="4585665b1bf59b90b831d5145d3e25d6e0743d03",
+    ),
+}
+DEFAULT_SEGFORMER = "segformer-b1"
+
 MODELS: dict[str, tuple[Model, ...]] = {
     "02-segmentation": (
         Model("uva-cv-lab/OmniShotCut", "OmniShotCut_ckpt.pth"),
@@ -51,7 +67,7 @@ MODELS: dict[str, tuple[Model, ...]] = {
     ),
     "05-global-experts": (
         Model("depth-anything/Depth-Anything-V2-Small-hf"),
-        Model("nvidia/segformer-b1-finetuned-ade-512-512"),
+        SEGFORMERS[DEFAULT_SEGFORMER],
         Model("facebook/mask2former-swin-tiny-coco-panoptic"),
     ),
 }
@@ -68,7 +84,6 @@ FILES: dict[str, tuple[File, ...]] = {
             f"{OPENCV_ZOO}/face_detection_yunet/face_detection_yunet_2023mar.onnx",
             "face_yunet.onnx",
         ),
-        # PP-OCRv3's DB detection stage, exported for OpenCV's dnn text detector.
         File(
             f"{OPENCV_ZOO}/text_detection_ppocr/text_detection_en_ppocrv3_2023may.onnx",
             "text_ppocrv3.onnx",
@@ -84,7 +99,6 @@ FILES: dict[str, tuple[File, ...]] = {
         File(f"{ANNOTATORS}/table5_pidinet.pth", "table5_pidinet.pth"),
     ),
     "07-conditional-experts": (
-        # One pass gives mesh, head pose and blendshapes.
         File(
             f"{MEDIAPIPE}/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
             "face_landmarker.task",
@@ -94,15 +108,11 @@ FILES: dict[str, tuple[File, ...]] = {
             "pose_landmarker_full.task",
             "pose_landmarker_full.task",
         ),
-        # Eight emotions plus valence and arousal from one EfficientNet-B0 pass.
         File(f"{HSEMOTION}/enet_b0_8_va_mtl.onnx", "emotion_enet_b0_va.onnx"),
-        # CRNN recognition: the half of OCR 03 deliberately left out.
         File(
             f"{OPENCV_ZOO}/text_recognition_crnn/text_recognition_CRNN_EN_2021sep.onnx",
             "text_crnn_en.onnx",
         ),
-        # Body appearance for 08-identity, which is the only descriptor most tracks get:
-        # a face embedding exists for 4 of patrick.mp4's 69 tracks, a body crop for 68.
         File(
             f"{OPENCV_ZOO}/person_reid_youtureid/person_reid_youtu_2021nov.onnx",
             "reid_youtu.onnx",
@@ -127,9 +137,16 @@ DETECTORS: dict[str, str] = {
     "yolo11m": f"{ULTRALYTICS}/yolo11m.pt",
     "rtdetr-l": f"{ULTRALYTICS}/rtdetr-l.pt",
 }
+DEFAULT_DETECTOR = "yolo11s"
 
-# Backbone weights the model libraries fetch themselves.
-# TORCH_HOME points into models/, so these are downloaded once instead of on every run.
+# Also on demand: the 4B variant is ~9 GB and should not arrive unasked.
+CAPTIONERS: dict[str, str] = {
+    "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
+    "qwen3-vl-4b": "Qwen/Qwen3-VL-4B-Instruct",
+}
+DEFAULT_CAPTIONER = "qwen3-vl-2b"
+
+# Fetched by the libraries themselves; TORCH_HOME keeps them in models/.
 BACKBONES: dict[str, tuple[str, ...]] = {
     "02-segmentation": ("https://download.pytorch.org/models/resnet18-f37072fd.pth",),
 }
@@ -149,7 +166,10 @@ def fetch(stage: str, url: str, filename: str) -> Path:
     target = stage_dir(stage) / filename
     if not target.exists():
         print(f"[{stage}] downloading {filename}")
-        urllib.request.urlretrieve(url, target)
+        # renamed once complete, so an interrupted download is retried
+        partial = target.with_name(target.name + ".part")
+        urllib.request.urlretrieve(url, partial)
+        partial.replace(target)
     return target
 
 
@@ -178,6 +198,15 @@ def detector(stage: str, name: str) -> Path:
     return fetch(stage, DETECTORS[name], f"{name}.pt")
 
 
+def captioner(stage: str, name: str) -> str:
+    """Returns the snapshot revision, recorded so a caption can be traced to its weights."""
+    from huggingface_hub import snapshot_download
+
+    if name not in CAPTIONERS:
+        raise ValueError(f"unknown captioner {name}; choose from {', '.join(CAPTIONERS)}")
+    return Path(snapshot_download(CAPTIONERS[name], cache_dir=str(stage_dir(stage)))).name
+
+
 def ensure(stage: str) -> None:
     models = MODELS.get(stage)
     if models:
@@ -192,7 +221,9 @@ def ensure(stage: str) -> None:
                 hf_hub_download(model.repo, model.filename, local_dir=str(model_dir))
             else:
                 # snapshot_download only fetches files missing from the cache.
-                snapshot_download(model.repo, cache_dir=str(model_dir))
+                snapshot_download(
+                    model.repo, revision=model.revision, cache_dir=str(model_dir)
+                )
 
     for item in FILES.get(stage, ()):
         fetch(stage, item.url, item.filename)
@@ -211,7 +242,8 @@ def main() -> None:
     for stage in stages:
         ensure(stage)
     if not sys.argv[1:]:
-        detector("03-profiler", "yolo11n")
+        detector("03-profiler", DEFAULT_DETECTOR)
+        captioner("11-caption", DEFAULT_CAPTIONER)
 
 
 if __name__ == "__main__":
