@@ -20,10 +20,16 @@ CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"
 
 PLACES_WEIGHTS = "resnet18_places365.pth.tar"
 PLACES_CATEGORIES = "categories_places365.txt"
+PLACES_IO = "io_places365.txt"
 TAG_LIST = "ram_tag_list.txt"
 EDGE_WEIGHTS = "table5_pidinet.pth"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
+
+HISTOGRAM_BINS = 16  # per RGB channel
+PALETTE_LEVELS = 8  # per channel, so 512 fixed colour cells
+PALETTE_KEPT = 8  # cells kept per keyframe
+THINGS = 80  # COCO panoptic ids below this are countable objects, the rest is stuff
 
 
 def _device(name: str) -> str:
@@ -82,11 +88,40 @@ def _write(path: Path, image: Array) -> str:
     return f"global/{path.parent.name}/{path.name}"
 
 
+def _palette(rgb: Array) -> list[dict[str, Any]]:
+    """Fixed colour cells, not k-means: deterministic, and mergeable across keyframes by share."""
+    cells = rgb // (256 // PALETTE_LEVELS)
+    index = (cells[:, 0] * PALETTE_LEVELS + cells[:, 1]) * PALETTE_LEVELS + cells[:, 2]
+    counts = np.bincount(index, minlength=PALETTE_LEVELS**3)
+    sums = [np.bincount(index, weights=rgb[:, c], minlength=PALETTE_LEVELS**3) for c in range(3)]
+    order = np.argsort(-counts, kind="stable")[:PALETTE_KEPT]
+    return [
+        {
+            "cell": int(i),
+            "rgb": [round(float(s[i]) / int(counts[i])) for s in sums],
+            "share": round(int(counts[i]) / len(rgb), 4),
+        }
+        for i in order
+        if counts[i]
+    ]
+
+
 def _classical(image: Array) -> dict[str, Any]:
     """Near-free descriptors: colour, contrast, focus, spatial organisation."""
     lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blue, green, red = (image[:, :, i].astype(np.float32) for i in range(3))
+    rgb = image[:, :, ::-1].reshape(-1, 3).astype(np.int64)
+    # Absolute channel spread: 0 on a grey pixel, unlike HSV saturation, which is relative.
+    chroma = float((rgb.max(axis=1) - rgb.min(axis=1)).mean()) / 255.0
+    histogram = {
+        name: [
+            round(float(v), 4)
+            for v in np.bincount(rgb[:, c] * HISTOGRAM_BINS // 256, minlength=HISTOGRAM_BINS)
+            / len(rgb)
+        ]
+        for c, name in enumerate(("r", "g", "b"))
+    }
 
     # Hasler-Susstrunk colourfulness.
     rg = red - green
@@ -122,6 +157,9 @@ def _classical(image: Array) -> dict[str, Any]:
             float(cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[:, :, 1].mean()) / 255.0, 4
         ),
         "colourfulness": round(colourfulness, 3),
+        "chroma": round(chroma, 4),
+        "histogram": histogram,
+        "palette": _palette(rgb),
         "focus": round(float(cv2.Laplacian(gray, cv2.CV_32F).var()), 2),
         "mean_lab": [round(float(lab[:, :, i].mean()), 2) for i in range(3)],
         "edge_density": round(float(edges.mean()), 4),
@@ -211,22 +249,26 @@ def _edges(images: list[Array], device: str, model_dir: Path) -> list[Array]:
     return maps
 
 
-def _places_labels(path: Path) -> list[str]:
-    """Lines look like '/a/airfield 0' or '/b/baseball_field 12'."""
-    labels = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            labels.append(line.split()[0].rsplit("/", 1)[-1].replace("_", " "))
-    return labels
+def _lines(path: Path) -> list[list[str]]:
+    return [line.split() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _places(model_dir: Path) -> tuple[list[str], Array]:
+    """Full names, so /b/basketball_court/indoor is not just 'indoor', and Places365's IO flags."""
+    paths = [parts[0] for parts in _lines(model_dir / PLACES_CATEGORIES)]
+    io = {parts[0]: parts[1] for parts in _lines(model_dir / PLACES_IO)}
+    names = [p[3:].replace("/", " ").replace("_", " ") for p in paths]
+    outdoor: Array = np.array([1.0 if io[p] == "2" else 0.0 for p in paths])
+    return names, outdoor
 
 
 def _scene(
     images: list[Array], device: str, model_dir: Path, top: int, batch: int
-) -> list[list[dict[str, Any]]]:
+) -> tuple[list[list[dict[str, Any]]], list[float]]:
     import torch
     from torchvision.models import resnet18
 
-    labels = _places_labels(model_dir / PLACES_CATEGORIES)
+    labels, outdoor_flags = _places(model_dir)
     model = resnet18(num_classes=len(labels))
     blob = torch.load(
         model_dir / PLACES_WEIGHTS, map_location="cpu", weights_only=False
@@ -239,6 +281,7 @@ def _scene(
     std = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
 
     out: list[list[dict[str, Any]]] = []
+    outdoor: list[float] = []
     with torch.no_grad():
         for i in range(0, len(images), batch):
             chunk = [
@@ -260,8 +303,10 @@ def _scene(
                         for k in order
                     ]
                 )
+                # Probability mass on outdoor categories, over all 365 rather than the top few.
+                outdoor.append(round(float(row @ outdoor_flags), 4))
     _free(model)
-    return out
+    return out, outdoor
 
 
 def _tags(
@@ -341,8 +386,9 @@ def _semantic(
 
 
 def _panoptic(
-    images: list[Array], device: str, cache: Path, batch: int
-) -> tuple[list[Array], list[list[dict[str, Any]]]]:
+    images: list[Array], disparity: list[Array], device: str, cache: Path, batch: int
+) -> tuple[list[Array], list[list[dict[str, Any]]], list[float | None]]:
+    """Segments carry their median normalised disparity (1 is nearest); so does the background."""
     import torch
     from transformers import AutoImageProcessor, Mask2FormerForUniversalSegmentation
 
@@ -355,6 +401,7 @@ def _panoptic(
 
     maps: list[Array] = []
     listings: list[list[dict[str, Any]]] = []
+    backgrounds: list[float | None] = []
     with torch.no_grad():
         for i in range(0, len(images), batch):
             chunk = images[i : i + batch]
@@ -365,16 +412,21 @@ def _panoptic(
                 outputs, target_sizes=[im.shape[:2] for im in chunk]
             )
 
-            for result in results:
+            for j, result in enumerate(results):
                 label_map = result["segmentation"].cpu().numpy()
                 maps.append(np.clip(label_map + 1, 0, 255).astype(np.uint8))
+                near = disparity[i + j]
 
                 pixels = label_map.size
+                things = np.zeros(label_map.shape, dtype=bool)
                 segments: list[dict[str, Any]] = []
                 for info in result["segments_info"]:
                     mask = label_map == info["id"]
                     if not mask.any():
                         continue
+                    thing = int(info["label_id"]) < THINGS
+                    if thing:
+                        things |= mask
                     ys, xs = np.nonzero(mask)
                     segments.append(
                         {
@@ -383,6 +435,7 @@ def _panoptic(
                             "label": names.get(
                                 int(info["label_id"]), str(info["label_id"])
                             ),
+                            "thing": thing,
                             "score": round(float(info.get("score", 1.0)), 3),
                             "area": round(float(mask.sum()) / pixels, 5),
                             "bbox": [
@@ -391,11 +444,16 @@ def _panoptic(
                                 int(xs.max()),
                                 int(ys.max()),
                             ],
+                            "disparity": round(float(np.median(near[mask])), 4),
                         }
                     )
                 listings.append(sorted(segments, key=lambda s: -float(s["area"])))
+                rest = ~things
+                backgrounds.append(
+                    round(float(np.median(near[rest])), 4) if rest.any() else None
+                )
     _free(model)
-    return maps, listings
+    return maps, listings, backgrounds
 
 
 def _coverage(label_map: Array, names: dict[int, str], top: int) -> dict[str, float]:
@@ -424,6 +482,7 @@ def run(cfg: Config) -> dict[str, Any]:
             "key": k,
             "shot": s,
             "frame": int(k.split("_")[1]),
+            "size": [int(im.shape[1]), int(im.shape[0])],  # of every map and box below
             "classical": _classical(im),
         }
         for k, s, im in zip(keys, shots, images)
@@ -431,10 +490,13 @@ def run(cfg: Config) -> dict[str, Any]:
 
     root = cfg.out_root / "global"
     depth_maps = _depth(images, device, cfg.model_dir, batch)
+    disparity: list[Array] = []  # kept for the panoptic pass
     for record, depth in zip(records, depth_maps):
         low, high = float(depth.min()), float(depth.max())
         span = high - low
-        scaled = ((depth - low) / span * 65535.0) if span else np.zeros_like(depth)
+        unit = ((depth - low) / span) if span else np.zeros_like(depth)
+        disparity.append(unit.astype(np.float32))
+        scaled = unit * 65535.0
         record["depth"] = {
             "path": _write(
                 root / "depth" / f"{record['key']}.png", scaled.astype(np.uint16)
@@ -455,10 +517,10 @@ def run(cfg: Config) -> dict[str, Any]:
             "density": round(float((edge > 128).mean()), 4),
         }
 
-    for record, scene in zip(
-        records, _scene(images, device, cfg.model_dir, cfg.scenes, batch)
-    ):
+    scenes, outdoor = _scene(images, device, cfg.model_dir, cfg.scenes, batch)
+    for record, scene, share in zip(records, scenes, outdoor):
         record["scene"] = scene
+        record["outdoor"] = share
 
     embeddings: Array = np.load(cfg.embeddings_dir / "keyframe_embeddings.npy")
     for record, tags in zip(
@@ -477,15 +539,20 @@ def run(cfg: Config) -> dict[str, Any]:
         }
     del semantic_maps
 
-    panoptic_maps, listings = _panoptic(images, device, cfg.model_dir, batch)
-    for record, label_map, segments in zip(records, panoptic_maps, listings):
+    panoptic_maps, listings, backgrounds = _panoptic(
+        images, disparity, device, cfg.model_dir, batch
+    )
+    for record, label_map, segments, background in zip(
+        records, panoptic_maps, listings, backgrounds
+    ):
         record["panoptic"] = {
             "path": _write(root / "panoptic" / f"{record['key']}.png", label_map),
             "label_space": "coco_panoptic",
             "segment_count": len(segments),
             "segments": segments[: cfg.seg_top],
+            "background_disparity": background,
         }
-    del panoptic_maps
+    del panoptic_maps, disparity
 
     meta = {
         "video": str(cfg.video),

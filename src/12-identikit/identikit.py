@@ -42,15 +42,10 @@ SCALE: tuple[tuple[str, str, float], ...] = (
     ("medium", "body_height", 0.75),
     ("long", "body_height", 0.25),
 )
+GRAYSCALE = 0.01  # weighted chroma; a grey keyframe re-encoded as JPEG reads 0.0, the dullest colour clip 0.03
 PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
 
 PENDING: dict[str, str] = {
-    "plastic.video.grayscale": "05 does not compute it",
-    "plastic.video.colour_histogram": "05 does not compute it",
-    "plastic.segments[].palette": "05 does not compute it",
-    "plastic.segments[].centralities": "09 does not carry 05's panoptic boxes forward",
-    "plastic.segments[].depth": "05 writes depth maps that no stage reads back",
-    "figurative.segments[].indoor_outdoor": "Places365's indoor/outdoor labels are not fetched",
     "enunciative.persons[].gaze": "no gaze model is installed",
 }
 
@@ -63,6 +58,12 @@ PROVENANCE: dict[str, str] = {
     "timeline": "02 shot boundaries and 08 person ids, via 09",
     "plastic.segments[].visual": "05 OpenCV and NumPy measures, via 09",
     "plastic.segments[].coverage": "05 SegFormer-B1 on ADE20K, via 09",
+    "plastic.segments[].palette": "05 fixed colour cells, via 09",
+    "plastic.segments[].centralities": "05 Mask2Former panoptic boxes, via 09",
+    "plastic.segments[].depth": "05 Depth Anything V2 under Mask2Former segments, via 09",
+    "plastic.video.colour_histogram": "05 RGB histograms, via 09, duration-weighted",
+    "plastic.video.grayscale": "05 chroma, via 09, duration-weighted, against GRAYSCALE",
+    "figurative.segments[].indoor_outdoor": "05 Places365 ResNet-18 with Places365's IO list, via 09",
     "figurative.segments[].tags": "05 MobileCLIP against RAM's tag list, via 09",
     "figurative.segments[].place": "05 Places365 ResNet-18, via 09",
     "figurative.segments[].objects": "06 YOLO11 temporal union, via 09",
@@ -90,6 +91,8 @@ CAVEATS: tuple[str, ...] = (
     "attention is head orientation, not gaze",
     "placement 'nearer' is a box-area proxy, not depth",
     "place comes from Places365 and is weak on broadcast and animated footage; tags are steadier",
+    "depth is relative disparity within each keyframe, 1 nearest: an order and ratios, not distances",
+    "centralities and depth are per label: panoptic segments are not matched across keyframes",
     "age and gender are a perceived estimate from one small model, not a property of a person",
     "text is read by a CRNN in ten-character chunks, so word boundaries are not real",
     "visible_at_once is the maximum over a segment's keyframes, so it is itself a lower bound",
@@ -279,6 +282,63 @@ def _head_pose(person: dict[str, Any]) -> dict[str, Any] | None:
     return {axis: _measure(pose.get(axis)) for axis in ("yaw", "pitch", "roll")}
 
 
+def _histogram(histograms: list[tuple[dict[str, list[float]], float]]) -> dict[str, Any] | None:
+    """Segment histograms weighted by duration, like the other video-level plastic values."""
+    total = sum(seconds for _, seconds in histograms)
+    if not histograms or total <= 0:
+        return None
+    return {
+        channel: [
+            round(sum(h[channel][i] * seconds for h, seconds in histograms) / total, 4)
+            for i in range(len(histograms[0][0][channel]))
+        ]
+        for channel in ("r", "g", "b")
+    }
+
+
+def _band(value: float, names: tuple[str, str, str]) -> str:
+    return names[0] if value < 1 / 3 else (names[2] if value > 2 / 3 else names[1])
+
+
+def _centralities(plastic: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "label": t["label"],
+            "horizontal": _band(float(t["x"]), ("left", "centre", "right")),
+            "vertical": _band(float(t["y"]), ("top", "middle", "bottom")),
+            **{k: t[k] for k in ("x", "y", "centrality", "area", "spread", "n")},
+        }
+        for t in plastic.get("things") or []
+    ]
+
+
+def _depth(plastic: dict[str, Any]) -> dict[str, Any] | None:
+    things = plastic.get("things") or []
+    background = (plastic.get("background_disparity") or {}).get("mean")
+    if not things and background is None:
+        return None
+    return {
+        "background": background,
+        "objects": [
+            {
+                "label": t["label"],
+                "disparity": t["disparity"],
+                "ratio": round(float(t["disparity"]) / background, 3) if background else None,
+            }
+            for t in things
+        ],
+        "order": [t["label"] for t in sorted(things, key=lambda t: (-float(t["disparity"]), t["label"]))],
+    }
+
+
+def _indoor_outdoor(plastic: dict[str, Any]) -> dict[str, Any] | None:
+    stats = plastic.get("outdoor") or {}
+    if not stats.get("n"):
+        return None
+    label = "outdoor" if float(stats["mean"]) >= 0.5 else "indoor"
+    return {"label": label, "outdoor": stats["mean"], "n": stats["n"]}
+
+
 def _framing(framing: dict[str, Any]) -> dict[str, Any]:
     """Null where nobody was followed: there is no one to frame."""
     if not framing.get("frames"):
@@ -363,6 +423,7 @@ def run(cfg: Config) -> dict[str, Any]:
     figurative_segments: list[dict[str, Any]] = []
     enunciative_segments: list[dict[str, Any]] = []
     weighted: dict[str, list[tuple[float, float]]] = {}
+    histograms: list[tuple[dict[str, list[float]], float]] = []
     for shot, seconds in zip(shots, lengths):
         index = int(shot["index"])
         plastic = shot["plastic"]
@@ -384,15 +445,20 @@ def run(cfg: Config) -> dict[str, Any]:
         }
         for key, value in visual.items():
             weighted.setdefault(key, []).append((float(value), seconds))
+        if plastic.get("histogram"):
+            histograms.append((plastic["histogram"], seconds))
         coverage = ((plastic.get("semantic") or {}).get("coverage")) or {}
         plastic_segments.append(
             {
                 "segment": index,
                 "visual": visual,
                 "coverage": {name: c["mean"] for name, c in coverage.items()},
-                "palette": None,
-                "centralities": None,
-                "depth": None,
+                "palette": [
+                    {"hex": "#{:02x}{:02x}{:02x}".format(*c["rgb"]), "share": c["share"]}
+                    for c in plastic.get("palette") or []
+                ],
+                "centralities": _centralities(plastic),
+                "depth": _depth(plastic),
             }
         )
 
@@ -404,7 +470,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     {"label": p["label"], "score": p["score"]}
                     for p in (plastic.get("scene") or [])[:keep]
                 ],
-                "indoor_outdoor": None,
+                "indoor_outdoor": _indoor_outdoor(plastic),
                 "objects": [
                     {"label": o["label"], "frames": o["frame_count"]}
                     for o in shot.get("objects", [])
@@ -425,6 +491,8 @@ def run(cfg: Config) -> dict[str, Any]:
             }
         )
 
+    video_visual = {key: _weighted(values) for key, values in weighted.items()}
+    chroma = video_visual.get("chroma")
     kept = [
         _relation(r)
         for r in relations["relations"]
@@ -487,9 +555,9 @@ def run(cfg: Config) -> dict[str, Any]:
         },
         "plastic": {
             "video": {
-                **{key: _weighted(values) for key, values in weighted.items()},
-                "grayscale": None,
-                "colour_histogram": None,
+                **video_visual,
+                "grayscale": float(chroma["mean"]) < GRAYSCALE if chroma else None,
+                "colour_histogram": _histogram(histograms),
             },
             "segments": plastic_segments,
         },

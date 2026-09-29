@@ -25,10 +25,12 @@ CLASSICAL_KEYS = (
     "contrast_rms",
     "saturation",
     "colourfulness",
+    "chroma",
     "focus",
     "edge_density",
     "horizontal_symmetry",
 )
+PALETTE = 6  # colours kept per segment
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -303,7 +305,74 @@ def _plastic(keyframes: list[dict[str, Any]], cfg: Config) -> dict[str, Any]:
     ]
     if counts:
         out["panoptic_segments"] = _stats(counts)
+    outdoor = [float(k["outdoor"]) for k in keyframes if "outdoor" in k]
+    if outdoor:
+        out["outdoor"] = _stats(outdoor)
+    out.update(_colour(keyframes))
+    out.update(_things(keyframes, cfg.agg_top))
     return out
+
+
+def _colour(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Mean histogram, and 05's colour cells merged across keyframes by share."""
+    hists = [k["classical"]["histogram"] for k in keyframes if "histogram" in k["classical"]]
+    cells: dict[int, list[tuple[float, list[int]]]] = {}
+    for keyframe in keyframes:
+        for entry in keyframe["classical"].get("palette", []):
+            cells.setdefault(int(entry["cell"]), []).append((float(entry["share"]), entry["rgb"]))
+    palette: list[dict[str, Any]] = []
+    for parts in cells.values():
+        weight = sum(share for share, _ in parts)
+        rgb = [round(sum(share * c[i] for share, c in parts) / weight) for i in range(3)]
+        palette.append({"rgb": rgb, "share": round(weight / len(keyframes), 4)})
+    palette.sort(key=lambda p: (-float(p["share"]), p["rgb"]))
+    out: dict[str, Any] = {"palette": palette[:PALETTE]}
+    if hists:
+        out["histogram"] = {
+            c: [round(float(v), 4) for v in np.mean([h[c] for h in hists], axis=0)]
+            for c in ("r", "g", "b")
+        }
+    return out
+
+
+def _things(keyframes: list[dict[str, Any]], top: int) -> dict[str, Any]:
+    """05's panoptic objects per label; unmatched across keyframes, so a label pools its instances."""
+    found: dict[str, list[tuple[float, float, float, float, float]]] = {}
+    for keyframe in keyframes:
+        width, height = keyframe["size"]
+        for segment in keyframe["panoptic"]["segments"]:
+            if not segment.get("thing"):
+                continue
+            x1, y1, x2, y2 = segment["bbox"]
+            x, y = (x1 + x2) / 2 / width, (y1 + y2) / 2 / height
+            centrality = 1.0 - float(np.hypot(x - 0.5, y - 0.5) / np.hypot(0.5, 0.5))
+            found.setdefault(str(segment["label"]), []).append(
+                (x, y, centrality, float(segment["area"]), float(segment["disparity"]))
+            )
+    things: list[dict[str, Any]] = []
+    for label, rows in found.items():
+        arr = np.asarray(rows)
+        mean = arr.mean(axis=0)
+        spread = (
+            round(float(np.sqrt(arr[:, 0].var(ddof=1) + arr[:, 1].var(ddof=1))), 4)
+            if len(rows) >= 2
+            else None
+        )
+        things.append(
+            {
+                "label": label,
+                "n": len(rows),
+                **{k: round(float(v), 4) for k, v in zip(("x", "y", "centrality", "area", "disparity"), mean)},
+                "spread": spread,
+            }
+        )
+    things.sort(key=lambda t: (-float(t["area"]), str(t["label"])))
+    backgrounds = [
+        float(k["panoptic"]["background_disparity"])
+        for k in keyframes
+        if k["panoptic"].get("background_disparity") is not None
+    ]
+    return {"things": things[:top], "background_disparity": _stats(backgrounds)}
 
 
 def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -379,6 +448,8 @@ def run(cfg: Config) -> dict[str, Any]:
     conditional = _read(cfg.json_dir, "conditional.json", "07-conditional-experts")
     global_meta = _read(cfg.json_dir, "global.json", "05-global-experts")
     identity = _read(cfg.json_dir, "identity.json", "08-identity")
+    if any("size" not in k for k in global_meta["keyframes"]):
+        raise RuntimeError("global.json predates 05's object depth; re-run 05-global-experts")
 
     fps = float(segmentation["fps"])
     size = _frame_size(cfg, tracks_meta)
