@@ -28,6 +28,9 @@ dependencies = [
     # 07-conditional-experts
     "mediapipe>=0.10.14,<0.10.30",
     "onnxruntime>=1.17,<2",
+
+    # preview.py
+    "matplotlib==3.10.9",
 ]
 
 [tool.uv]

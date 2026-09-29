@@ -95,6 +95,10 @@ FILES: dict[str, tuple[File, ...]] = {
             "https://raw.githubusercontent.com/CSAILVision/places365/master/categories_places365.txt",
             "categories_places365.txt",
         ),
+        File(
+            "https://raw.githubusercontent.com/CSAILVision/places365/master/IO_places365.txt",
+            "io_places365.txt",
+        ),
         File(RAM_TAGS, "ram_tag_list.txt"),
         File(f"{ANNOTATORS}/table5_pidinet.pth", "table5_pidinet.pth"),
     ),
