@@ -31,6 +31,7 @@ CLASSICAL_KEYS = (
     "horizontal_symmetry",
 )
 PALETTE = 6  # colours kept per segment
+IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the frame
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -225,6 +226,14 @@ def _person(
         }
 
     record.update(_affect(emotions))
+    gazes = [s["gaze"] for s in series if "gaze" in s]
+    if gazes:
+        inside = [float(g["in_frame"]) for g in gazes]
+        record["gaze"] = {
+            "n": len(gazes),
+            "in_frame": _stats(inside),
+            "in_frame_share": round(sum(1 for p in inside if p >= IN_FRAME) / len(inside), 3),
+        }
 
     pose = _pose_summary(series, cfg.pose_vis)
     if pose["n"]:

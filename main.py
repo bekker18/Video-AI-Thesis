@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, cast
@@ -276,6 +277,7 @@ def main() -> None:
     out_root.mkdir(parents=True, exist_ok=True)
 
     # Stages read from out_root, so any one can rerun alone once its inputs exist.
+    begun = time.perf_counter()
     for name in sorted(args.stages, key=STAGES.index):
         cfg = Config(
             video=video,
@@ -331,10 +333,12 @@ def main() -> None:
             identikit_attention=args.identikit_attention,
             identikit_labels=args.identikit_labels,
         )
+        started = time.perf_counter()  # includes the weights check, part of a stage's real cost
         download_models.ensure(name)
         print(f"[{name}] start")
         result = load_stage(name).run(cfg)
-        print(f"[{name}] done -> {result}")
+        print(f"[{name}] done in {time.perf_counter() - started:.1f} s -> {result}")
+    print(f"pipeline done in {time.perf_counter() - begun:.1f} s")
 
 
 if __name__ == "__main__":
