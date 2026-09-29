@@ -944,7 +944,9 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
         c.text("no objects found", size=9.5, colour=MUTED)
 
 
-def _card(c: Column, p: dict[str, Any], head: dict[str, Any] | None) -> None:
+def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
+    head = (watch or {}).get("head_pose")
+    gaze = (watch or {}).get("gaze")
     segments = ", ".join(str(s) for s in p["segments"])
     c.text(
         f"Person {p['person_id']} · segments {segments} · {p['seconds']:.1f} s · "
@@ -964,6 +966,8 @@ def _card(c: Column, p: dict[str, Any], head: dict[str, Any] | None) -> None:
     yaw = (head or {}).get("yaw")
     if yaw:
         lines.append(f"Head yaw {yaw['mean']:.1f} deg{_sd(yaw)} (n={yaw['n']})")
+    if gaze:
+        lines.append(f"Gaze inside the frame {gaze['in_frame_share']:.0%} (n={gaze['n']})")
     per = [
         f"seg {b['segment']} {b['emotion']['modal']} {round(b['emotion']['agreement'] * b['emotion']['n'])}/{b['emotion']['n']}"
         for b in p.get("by_segment") or []
@@ -1007,7 +1011,7 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
 
     c.heading("Content participants")
     persons = sorted(figurative["persons"], key=lambda p: (-int(p["support"]["series"]), int(p["person_id"])))
-    heads = {h["person_id"]: h["head_pose"] for h in kit["enunciative"]["persons"]}
+    heads = {h["person_id"]: h for h in kit["enunciative"]["persons"]}
     for p in persons[:2]:
         _card(c, p, heads.get(p["person_id"]))
     rest = [f"P{p['person_id']}" for p in persons[2:]]
@@ -1106,11 +1110,21 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     r = kit["summary"]["relations"]
     c.heading("Relations between persons")
     c.text(f"Co-present pairs {r['co_present']} · with evidence {r['with_evidence']}")
-    c.text(f"Attention {r['attention']} · mutual {r['mutual']} · synchrony {r['synchrony']} · cross-segment {r['cross_segment']}")
+    c.text(
+        f"Attention {r['attention']} · mutual {r['mutual']} · looks at {r.get('looks_at', 0)} · "
+        f"synchrony {r['synchrony']} · cross-segment {r['cross_segment']}"
+    )
     _graph(c, kit["enunciative"]["relations"], float(r["attention_floor"]))
     c.heading("Watcher-looked system")
-    c.text(f"Head pose for {_count(len(kit['enunciative']['persons']), 'person')}, mean and sd over their samples")
-    c.text("Gaze: not measured, no gaze model is installed", colour=MUTED)
+    persons = kit["enunciative"]["persons"]
+    c.text(f"Head pose for {_count(len(persons), 'person')}, mean and sd over their samples")
+    gazes = [p["gaze"] for p in persons if p.get("gaze")]
+    samples = sum(int(g["n"]) for g in gazes)
+    if samples:
+        inside = sum(float(g["in_frame_share"]) * int(g["n"]) for g in gazes) / samples
+        c.text(f"Gaze for {_count(len(gazes), 'person')}: inside the frame in {inside:.0%} of {samples} samples")
+    else:
+        c.text("Gaze: none measured", colour=MUTED)
     c.heading("Framing per segment")
     _framing_table(c, kit["enunciative"]["segments"])
 

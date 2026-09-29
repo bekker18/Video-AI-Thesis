@@ -153,6 +153,20 @@ DEFAULT_CAPTIONER = "qwen3-vl-2b"
 # Fetched by the libraries themselves; TORCH_HOME keeps them in models/.
 BACKBONES: dict[str, tuple[str, ...]] = {
     "02-segmentation": ("https://download.pytorch.org/models/resnet18-f37072fd.pth",),
+    "07-conditional-experts": (
+        "https://github.com/fkryan/gazelle/releases/download/v1.0.0/gazelle_dinov2_vitb14_inout.pt",
+        "https://dl.fbaipublicfiles.com/dinov2/dinov2_vitb14/dinov2_vitb14_pretrain.pth",
+    ),
+}
+
+# Gaze-LLE's code comes through torch hub, pinned to a commit; it loads DINOv2's by name.
+GAZE_REPO = "fkryan/gazelle:2d78f9f3bd2a5db360354954ec1a4c526ee8ab55"
+GAZE_MODEL = "gazelle_dinov2_vitb14_inout"
+
+# Torch hub code, fetched without GitHub API validation: unauthenticated calls are rate-limited,
+# and once a repo is cached, a later unvalidated load of it by name makes no call at all.
+HUB_REPOS: dict[str, tuple[str, ...]] = {
+    "07-conditional-experts": ("facebookresearch/dinov2", GAZE_REPO),
 }
 
 
@@ -240,9 +254,14 @@ def ensure(stage: str) -> None:
 
         torch.hub.load_state_dict_from_url(url, progress=False)  # no-op once cached
 
+    for repo in HUB_REPOS.get(stage, ()):
+        import torch
+
+        torch.hub.list(repo, trust_repo=True, skip_validation=True, verbose=False)
+
 
 def main() -> None:
-    stages = sys.argv[1:] or sorted({*MODELS, *FILES, *ARCHIVES, *BACKBONES})
+    stages = sys.argv[1:] or sorted({*MODELS, *FILES, *ARCHIVES, *BACKBONES, *HUB_REPOS})
     for stage in stages:
         ensure(stage)
     if not sys.argv[1:]:

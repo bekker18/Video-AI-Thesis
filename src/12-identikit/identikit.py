@@ -45,9 +45,7 @@ SCALE: tuple[tuple[str, str, float], ...] = (
 GRAYSCALE = 0.01  # weighted chroma; a grey keyframe re-encoded as JPEG reads 0.0, the dullest colour clip 0.03
 PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
 
-PENDING: dict[str, str] = {
-    "enunciative.persons[].gaze": "no gaze model is installed",
-}
+PENDING: dict[str, str] = {}
 
 EXCLUDED: dict[str, str] = {
     "ethnicity": "left out deliberately: a perceived category against a fixed taxonomy, "
@@ -80,6 +78,8 @@ PROVENANCE: dict[str, str] = {
     "figurative.persons[].by_segment": "07 HSEmotion and PoseLandmarker samples split by segment, via 09",
     "enunciative.persons[].head_pose": "07 MediaPipe FaceLandmarker, via 09",
     "enunciative.relations": "10, from 06 boxes and 07 head pose and affect",
+    "enunciative.relations[].looks_at": "10, from 07 Gaze-LLE look-at points in 06 body boxes",
+    "enunciative.persons[].gaze": "07 Gaze-LLE with DINOv2 ViT-B on the frame and head box, via 09",
     "enunciative.segments[].visible_at_once": "03 YOLO11 person count over keyframes",
     "enunciative.segments[].followed": "08 person ids, via 09",
     "enunciative.segments[].camera_distance": "06 YuNet face and YOLO11 body boxes, via 09",
@@ -88,7 +88,9 @@ PROVENANCE: dict[str, str] = {
 }
 
 CAVEATS: tuple[str, ...] = (
-    "attention is head orientation, not gaze",
+    "attention is head orientation, not gaze; looks_at is gaze",
+    "gaze comes from an enlarged YuNet face box and the scene: faces YuNet misses have none, and "
+    "the model was trained on real video, not animation or CGI",
     "placement 'nearer' is a box-area proxy, not depth",
     "place comes from Places365 and is weak on broadcast and animated footage; tags are steadier",
     "depth is relative disparity within each keyframe, 1 nearest: an order and ratios, not distances",
@@ -206,6 +208,7 @@ def _relation(relation: dict[str, Any]) -> dict[str, Any]:
     attention = relation["attention"]
     synchrony = relation["synchrony"]
     placement = relation["placement"]
+    looks = relation["looks_at"]
     heads = attention["a_to_b"].get("available") or attention["b_to_a"].get("available")
     return {
         "pair": [relation["a"], relation["b"]],
@@ -223,9 +226,27 @@ def _relation(relation: dict[str, Any]) -> dict[str, Any]:
         }
         if heads
         else None,
+        "looks_at": {
+            "a_to_b": looks["a_to_b"].get("share"),
+            "b_to_a": looks["b_to_a"].get("share"),
+            "mutual": looks["mutual"],
+        }
+        if looks["a_to_b"].get("available") or looks["b_to_a"].get("available")
+        else None,
         "synchrony": {k: synchrony.get(k) for k in ("valence", "arousal", "n")}
         if synchrony["available"]
         else None,
+    }
+
+
+def _gaze(person: dict[str, Any]) -> dict[str, Any] | None:
+    gaze = person.get("gaze")
+    if not gaze:
+        return None
+    return {
+        "in_frame_share": gaze["in_frame_share"],
+        "in_frame": _measure(gaze["in_frame"]),
+        "n": gaze["n"],
     }
 
 
@@ -414,7 +435,7 @@ def run(cfg: Config) -> dict[str, Any]:
             continue
         described.append(record)
         if head_pose is not None:
-            heads.append({"person_id": pid, "head_pose": head_pose, "gaze": None})
+            heads.append({"person_id": pid, "head_pose": head_pose, "gaze": _gaze(person)})
         if dropped:
             conflicts.append({"person_id": pid, "dropped": dropped})
 
@@ -524,6 +545,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 "with_evidence": len(kept),
                 "attention": relations["attention_edges"],
                 "mutual": sum(1 for r in relations["relations"] if r["attention"]["mutual"]),
+                "looks_at": relations["looks_at_edges"],
                 "synchrony": relations["synchrony_edges"],
                 "cross_segment": relations["cross_segment_relations"],
                 "attention_floor": cfg.identikit_attention,

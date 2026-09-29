@@ -435,6 +435,61 @@ def _clip_attributes(
     return out
 
 
+def _gaze_model(device: str) -> tuple[Any, Any]:
+    import torch
+
+    loaded: Any = torch.hub.load(
+        download_models.GAZE_REPO,
+        download_models.GAZE_MODEL,
+        trust_repo=True,
+        skip_validation=True,
+    )
+    model, transform = loaded
+    return model.to(device).eval(), transform
+
+
+def _head_box(face: list[int], width: int, height: int) -> tuple[float, float, float, float]:
+    """YuNet's face box grown to take in hair and chin, as Gaze-LLE expects a head, normalised."""
+    x1, y1, x2, y2 = face
+    w, h = x2 - x1, y2 - y1
+    return (
+        max(0.0, (x1 - 0.2 * w) / width),
+        max(0.0, (y1 - 0.4 * h) / height),
+        min(1.0, (x2 + 0.2 * w) / width),
+        min(1.0, (y2 + 0.1 * h) / height),
+    )
+
+
+def _gaze_pass(
+    gaze: tuple[Any, Any], image: Array, faces: list[list[int]], device: str
+) -> list[dict[str, Any]]:
+    """One pass per frame for all its faces: the heatmap peak as the look-at point in frame pixels,
+    and the probability that what is looked at is inside the frame."""
+    import torch
+    from PIL import Image
+
+    model, transform = gaze
+    height, width = image.shape[:2]
+    tensor = transform(Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB)))
+    boxes = [[_head_box(face, width, height) for face in faces]]
+    with torch.no_grad():
+        out = model({"images": tensor.unsqueeze(0).to(device), "bboxes": boxes})
+    results: list[dict[str, Any]] = []
+    for heatmap, inside in zip(out["heatmap"][0].cpu().numpy(), out["inout"][0].cpu().numpy()):
+        row, col = np.unravel_index(int(np.argmax(heatmap)), heatmap.shape)
+        results.append(
+            {
+                "target": [
+                    round((int(col) + 0.5) / heatmap.shape[1] * width),
+                    round((int(row) + 0.5) / heatmap.shape[0] * height),
+                ],
+                "peak": round(float(heatmap.max()), 4),
+                "in_frame": round(float(inside), 4),
+            }
+        )
+    return results
+
+
 def _frames(video: Path, wanted: set[int]) -> Iterator[tuple[int, Array]]:
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
@@ -482,10 +537,12 @@ def run(cfg: Config) -> dict[str, Any]:
 
     face_landmarker, pose_landmarker = _landmarkers(model_dir, want_face, want_pose)
     emotion = _session(model_dir / EMOTION_MODEL) if want_face else None
+    gaze = _gaze_model(device) if want_face and schedule else None
 
     series: dict[tuple[int, int], list[dict[str, Any]]] = {}
     if schedule:
         for index, image in _frames(cfg.video, set(schedule)):
+            looking: list[tuple[dict[str, Any], list[int]]] = []
             for shot, track_id, row in schedule[index]:
                 experts = gates.get(shot, set())
                 sample: dict[str, Any] = {"frame": index}
@@ -505,6 +562,7 @@ def run(cfg: Config) -> dict[str, Any]:
                             feeling = _emotion_pass(emotion, crop)
                             if feeling:
                                 sample["emotion"] = feeling
+                        looking.append((sample, row["face"]))
 
                 if "body" in experts and pose_landmarker is not None:
                     crop = _crop(image, row["body"])
@@ -515,6 +573,12 @@ def run(cfg: Config) -> dict[str, Any]:
 
                 if len(sample) > 1:
                     series.setdefault((shot, track_id), []).append(sample)
+
+            # Gaze needs every head in the frame at once, so it runs after the frame's rows.
+            if gaze is not None and looking:
+                found_gaze = _gaze_pass(gaze, image, [face for _, face in looking], device)
+                for (sample, _), result in zip(looking, found_gaze):
+                    sample["gaze"] = result
 
     # Attributes read 06's ranked crops straight off disk - no decoding at all.
     attribute_jobs: list[tuple[int, int, int, Path]] = []
@@ -693,6 +757,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "series_stride": cfg.series_stride,
         "series_samples": sum(len(v) for v in series.values()),
         "tracks_with_series": len(series),
+        "gaze_samples": sum(1 for samples in series.values() for s in samples if "gaze" in s),
         "face_embeddings": len(embeddings),
         "body_embeddings": int(body_embeddings.shape[0]),
         "text_regions": sum(len(v) for v in text_by_shot.values()),
@@ -705,6 +770,7 @@ def run(cfg: Config) -> dict[str, Any]:
             "body_appearance": REID_MODEL,
             "ocr": OCR_MODEL,
             "attributes": CLIP_MODEL,
+            "gaze": f"{download_models.GAZE_MODEL} at {download_models.GAZE_REPO}",
         },
         "note": "series samples are observations only; interpolated rows are never measured",
         # Recorded rather than silently skipped: the router fires object_masks,

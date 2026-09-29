@@ -28,6 +28,7 @@ dependencies = [
     # 07-conditional-experts
     "mediapipe>=0.10.14,<0.10.30",
     "onnxruntime>=1.17,<2",
+    "scikit-learn==1.6.1",  # only because Gaze-LLE's utils import it at load
 
     # preview.py
     "matplotlib==3.10.9",
@@ -53,3 +54,7 @@ omnishotcut = { git = "https://github.com/UVA-Computer-Vision-Lab/OmniShotCut.gi
 
 [dependency-groups]
 dev = ["pyright>=1.1.390"]
+
+[tool.pyright]
+# models/ holds third-party code torch hub caches; data/ is output. The rest are pyright's defaults.
+exclude = ["models", "data", "**/.*", "**/__pycache__", "**/node_modules"]

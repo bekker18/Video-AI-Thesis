@@ -1,19 +1,5 @@
-"""10-relations: compute the relations between the people 09 resolved.
-
-09 produced the nodes: one record per global person. This produces the edges only, which are
-the facts no single person's record can hold - who attends whom, whose affect moves together,
-who stands where relative to whom. Every edge carries the frames and sample counts behind it,
-so a relation can be argued with rather than only read.
-
-A person's frames are the union of the frames of the tracks 08 resolved them from,
-and 08 guarantees those are disjoint - a person is never two boxes in one frame - which is what makes
-the merged per-frame table well defined. A pair can now be co-present in several segments and
-their evidence accumulates across all of them. That is what makes synchrony computable on
-shot-heavy footage, where a segment-local series was two or three points and it abstained.
-
-Attention is derived from head orientation, not from a gaze model, so it is named for what it measures.
-Synchrony still abstains below a sample floor rather than correlating short series.
-"""
+"""10-relations: the edges between 09's persons - placement, attention by head orientation,
+where gaze lands, and affect synchrony - each with the frames and samples behind it."""
 
 from __future__ import annotations
 
@@ -28,6 +14,7 @@ import numpy as np
 from config import Config
 
 STAGE = "10-relations"
+IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the frame
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
@@ -53,8 +40,7 @@ def _overlaps(a: list[int], b: list[int]) -> bool:
 
 
 def _forward(pose: dict[str, float]) -> tuple[float, float]:
-    """Image-plane direction the head faces, from the same Euler angles 07 recorded.
-    Rebuilds R = Rz(roll) Ry(yaw) Rx(pitch) and projects its outward axis."""
+    """Image-plane direction the head faces: R = Rz(roll) Ry(yaw) Rx(pitch), outward axis."""
     yaw, pitch, roll = (math.radians(float(pose[k])) for k in ("yaw", "pitch", "roll"))
     rx = np.array(
         [
@@ -92,8 +78,7 @@ def _attends(
     other: dict[int, dict[str, Any]],
     limit: float,
 ) -> dict[str, Any]:
-    """Fraction of shared frames where the head points within `limit` degrees of the other person.
-    Head orientation, not gaze - there is no gaze model in the pipeline."""
+    """Share of shared frames where the head points within `limit` degrees of the other person."""
     hits = 0
     angles: list[float] = []
     for frame, sample in sorted(samples.items()):
@@ -125,11 +110,29 @@ def _attends(
     }
 
 
+def _looks_at(
+    samples: dict[int, dict[str, Any]], other: dict[int, dict[str, Any]]
+) -> dict[str, Any]:
+    """Share of shared frames with gaze where the look-at point lands in the other's body box."""
+    n = hits = 0
+    for frame, sample in sorted(samples.items()):
+        gaze, target = sample.get("gaze"), other.get(frame)
+        if not gaze or not target:
+            continue
+        n += 1
+        x, y = gaze["target"]
+        box = target["body"]
+        if float(gaze["in_frame"]) >= IN_FRAME and box[0] <= x <= box[2] and box[1] <= y <= box[3]:
+            hits += 1
+    if not n:
+        return {"n": 0, "available": False, "reason": "no shared frame with gaze"}
+    return {"n": n, "available": True, "share": round(hits / n, 3), "hits": hits}
+
+
 def _synchrony(
     a: dict[int, dict[str, Any]], b: dict[int, dict[str, Any]], floor: int
 ) -> dict[str, Any]:
-    """Correlation of two affect series. Below the floor it abstains:
-    correlating a handful of points produces a number with no meaning, and a number invites belief."""
+    """Correlation of two affect series; abstains below the sample floor."""
     shared = sorted(set(a) & set(b))
     usable = [
         f
@@ -162,8 +165,7 @@ def _synchrony(
 def _placement(
     a: dict[int, dict[str, Any]], b: dict[int, dict[str, Any]]
 ) -> dict[str, Any]:
-    """Relative position over the frames both are present. Size ratio stands in for depth ordering:
-    05 writes depth at keyframes only, so a per-frame ordering does not exist."""
+    """Relative position over shared frames; box size ratio stands in for depth."""
     shared = sorted(set(a) & set(b))
     if not shared:
         return {"n": 0}
@@ -220,8 +222,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 int(s["frame"]): s for s in track["series"]
             }
 
-    # One table per person, the union over its tracks. Frames cannot collide:
-    # 08 refuses to link two tracks that share one.
+    # One table per person; frames cannot collide, as 08 never links tracks sharing one.
     person_rows: dict[int, dict[int, dict[str, Any]]] = {}
     person_series: dict[int, dict[int, dict[str, Any]]] = {}
     segment_of: dict[int, dict[int, int]] = {}
@@ -245,7 +246,7 @@ def run(cfg: Config) -> dict[str, Any]:
     )
 
     relations: list[dict[str, Any]] = []
-    attention_edges = synchrony_edges = 0
+    attention_edges = synchrony_edges = looks_at_edges = 0
     for left, right in itertools.combinations(
         sorted(aggregated["persons"], key=lambda p: int(p["person_id"])), 2
     ):
@@ -259,6 +260,10 @@ def run(cfg: Config) -> dict[str, Any]:
         a_to_b = _attends(a_series, a_rows, b_rows, cfg.attention_deg)
         b_to_a = _attends(b_series, b_rows, a_rows, cfg.attention_deg)
         sync = _synchrony(a_series, b_series, cfg.sync_min)
+        a_sees_b = _looks_at(a_series, b_rows)
+        b_sees_a = _looks_at(b_series, a_rows)
+        if a_sees_b.get("hits") or b_sees_a.get("hits"):
+            looks_at_edges += 1
 
         if a_to_b["available"] or b_to_a["available"]:
             attention_edges += 1
@@ -271,8 +276,6 @@ def run(cfg: Config) -> dict[str, Any]:
                 "co_present": {
                     "n": len(together),
                     "frames": [together[0], together[-1]],
-                    # Two people can meet in more than one segment now,
-                    # and how many is a different fact from how long.
                     "segments": sorted({segment_of[a_id][f] for f in together}),
                 },
                 "placement": _placement(a_rows, b_rows),
@@ -283,12 +286,16 @@ def run(cfg: Config) -> dict[str, Any]:
                         a_to_b.get("share", 0) > 0 and b_to_a.get("share", 0) > 0
                     ),
                 },
+                "looks_at": {
+                    "a_to_b": a_sees_b,
+                    "b_to_a": b_sees_a,
+                    "mutual": bool(a_sees_b.get("hits") and b_sees_a.get("hits")),
+                },
                 "synchrony": sync,
             }
         )
 
-    # Text is bound to whichever people its region actually overlaps.
-    # Full-width captions overlap everyone, which the counts make visible rather than hide.
+    # Text is bound to whichever people its region overlaps.
     shots: list[dict[str, Any]] = []
     for shot in aggregated["shots"]:
         index = int(shot["index"])
@@ -320,6 +327,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "relation_count": len(relations),
         "attention_edges": attention_edges,
         "synchrony_edges": synchrony_edges,
+        "looks_at_edges": looks_at_edges,
         "cross_segment_relations": sum(
             1 for r in relations if len(r["co_present"]["segments"]) > 1
         ),
