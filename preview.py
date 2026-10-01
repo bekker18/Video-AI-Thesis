@@ -751,10 +751,6 @@ def _count(n: int, word: str) -> str:
     return f"{n} {word}" if n == 1 else f"{n} {word}s"
 
 
-def _ids(values: list[int]) -> str:
-    return ", ".join(str(v) for v in values) or "none"
-
-
 def _header(fig: Figure, kit: dict[str, Any], name: str) -> None:
     s = kit["summary"]
     fps = f" @ {s['fps']:g} fps" if s.get("fps") else ""
@@ -854,7 +850,7 @@ def _spark_row(c: Column, label: str, xs: list[float], ys: list[Any], span: floa
 
 
 def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
-    c = _box(fig, (0.015, 0.155, 0.315, 0.53), "Plastic level")
+    c = _box(fig, (0.015, 0.015, 0.315, 0.67), "Plastic level")
     segments = kit["plastic"]["segments"]
     video = kit["plastic"]["video"]
     timeline = kit["timeline"]["segments"]
@@ -981,7 +977,7 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
 
 
 def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
-    c = _box(fig, (0.345, 0.155, 0.315, 0.53), "Figurative level")
+    c = _box(fig, (0.345, 0.015, 0.315, 0.67), "Figurative level")
     figurative = kit["figurative"]
     caption = figurative.get("caption")
     c.heading("Caption")
@@ -1106,7 +1102,7 @@ def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
 
 
 def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
-    c = _box(fig, (0.675, 0.155, 0.31, 0.53), "Enunciative level")
+    c = _box(fig, (0.675, 0.015, 0.31, 0.67), "Enunciative level")
     r = kit["summary"]["relations"]
     c.heading("Relations between persons")
     c.text(f"Co-present pairs {r['co_present']} · with evidence {r['with_evidence']}")
@@ -1129,58 +1125,6 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     _framing_table(c, kit["enunciative"]["segments"])
 
 
-def _gaps_panel(fig: Figure, kit: dict[str, Any]) -> None:
-    x, y, w, h = 0.015, 0.012, 0.97, 0.13
-    fig.add_artist(
-        FancyBboxPatch(
-            (x, y),
-            w,
-            h,
-            boxstyle="round,pad=0,rounding_size=0.008",
-            mutation_aspect=ASPECT,
-            transform=fig.transFigure,
-            facecolor=SURFACE,
-            edgecolor=HAIRLINE,
-            linewidth=1.2,
-            zorder=-1,
-        )
-    )
-    fig.text(x + 0.012, y + h - 0.012, "What the pipeline could not determine", fontsize=16, weight="bold", color=INK, va="top")
-    gaps = kit["gaps"]
-    persons = kit["summary"]["persons"]
-    groups = (
-        (
-            "Identity",
-            [
-                f"{persons['tracked_only']} tracked but never described",
-                f"{len(gaps['abstained'])} left unlinked, no usable crop",
-                f"{len(gaps['thin'])} records on fewer than two samples",
-                f"{len(gaps['attribute_conflicts'])} attribute contradictions resolved",
-            ],
-        ),
-        (
-            "Coverage",
-            [
-                f"segments with no human branch: {_ids(gaps['segments_without_conditional_branch'])}",
-                f"under-tracked segments: {_ids(gaps['under_tracked_segments'])}",
-                f"frames with a face outside its body: {gaps['face_outside_body']}",
-            ],
-        ),
-        (
-            "Not measured",
-            [f"{path.rsplit('.', 1)[-1]}: {why}" for path, why in gaps["pending"].items()]
-            + [f"{field}: {why}" for field, why in gaps["excluded"].items()],
-        ),
-        ("Standing caveats", list(gaps["caveats"])),
-    )
-    starts, widths = (0.027, 0.2, 0.39, 0.6), (0.16, 0.18, 0.2, 0.37)
-    for (title, lines), left, width in zip(groups, starts, widths):
-        c = Column(fig, left, y + h - 0.045, width, y + 0.004)
-        c.text(title, size=11, weight="bold")
-        for line in lines:
-            c.text(line, size=9, colour=SECONDARY)
-
-
 def _identikit_page(root: Path, out_path: Path) -> None:
     path = root / "identikit.json"
     if not path.exists():
@@ -1192,7 +1136,6 @@ def _identikit_page(root: Path, out_path: Path) -> None:
     _plastic_column(fig, kit)
     _figurative_column(fig, kit)
     _enunciative_column(fig, kit)
-    _gaps_panel(fig, kit)
     fig.savefig(out_path, facecolor=PAGE)
 
 
