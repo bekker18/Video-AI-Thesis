@@ -1,5 +1,4 @@
-"""11-caption: one short caption for the whole video, from a pretrained VLM shown 02's
-keyframes and a summary of what the experts measured."""
+"""11-caption: one short caption for the whole video, from a VLM shown 02's keyframes and expert hints."""
 
 from __future__ import annotations
 
@@ -26,6 +25,10 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 MAX_WORDS = 12
 MAX_TOKENS = 40
 TOP = 5  # labels kept per hint line
+ADDRESS = 0.5  # share of a person's samples looking into the camera for the hint to say so
+ANIMALS = frozenset(
+    {"bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"}
+)
 
 INSTRUCTION = (
     f"Write one caption for this video: a single sentence of at most {MAX_WORDS} words. "
@@ -83,15 +86,20 @@ def _ranked(weights: dict[str, float]) -> list[str]:
 
 
 def _hints(
-    shots: list[dict[str, Any]],
+    aggregated: dict[str, Any],
     profile: dict[str, Any],
     relations: dict[str, Any],
-    floor: float,
+    cfg: Config,
 ) -> str:
-    """The whole video in four lines, each weighted by how long its segments last."""
+    """The whole video in seven lines, each weighted by how long its segments last."""
+    shots = aggregated["shots"]
+    floor = cfg.identikit_attention
+    mediums: dict[str, float] = {}
     tags: dict[str, float] = {}
     regions: dict[str, float] = {}
     objects: dict[str, float] = {}
+    animals: dict[str, float] = {}
+    moves: dict[str, float] = {}
     with_people = 0.0
     for shot in shots:
         seconds = float(shot["end_time"]) - float(shot["start_time"])
@@ -105,10 +113,17 @@ def _hints(
         for name, share in coverage.items():
             name = str(name).strip()  # ADE20K has "bed "
             regions[name] = regions.get(name, 0.0) + seconds * float(share["mean"])
+        for name, p in ((plastic.get("medium") or {}).get("distribution") or {}).items():
+            mediums[name] = mediums.get(name, 0.0) + seconds * float(p)
         for found in shot["objects"]:
-            objects[found["label"]] = objects.get(found["label"], 0.0) + int(
-                found["frame_count"]
-            )
+            label = found["label"]
+            if label not in ANIMALS:
+                objects[label] = objects.get(label, 0.0) + int(found["frame_count"])
+            elif float(found["share"]) >= cfg.subject_min:  # as 12's subjects
+                animals[label] = animals.get(label, 0.0) + seconds * float(found["share"])
+        movement = (shot.get("camera") or {}).get("movement")
+        if movement and movement != "unknown":
+            moves[movement] = moves.get(movement, 0.0) + seconds
         if shot["person_ids"]:
             with_people += seconds
 
@@ -132,15 +147,26 @@ def _hints(
             people += "; some face each other"
         elif any(max(pair) >= floor for pair in shares):
             people += "; some turn towards others"
+        addressing = sum(
+            1
+            for p in aggregated["persons"]
+            if int((p.get("address") or {}).get("n", 0)) >= 2
+            and float(p["address"]["share"]) >= ADDRESS
+        )
+        if addressing:
+            people += "; one looks into the camera" if addressing == 1 else "; some look into the camera"
     else:
         people = "none"
 
     return "\n".join(
         [
+            f"Medium: {', '.join(_ranked(mediums)[:1]) or 'unknown'}",
             f"Scene tags: {', '.join(_ranked(tags)) or 'none'}",
             f"Main regions: {', '.join(_ranked(regions)) or 'none'}",
             f"Objects detected: {', '.join(_ranked(objects)) or 'none'}",
+            f"Animals: {', '.join(_ranked(animals)) or 'none'}",
             f"People: {people}",
+            f"Camera movement: {', '.join(_ranked(moves)) or 'unknown'}",
         ]
     )
 
@@ -273,7 +299,7 @@ def run(cfg: Config) -> dict[str, Any]:
     relations = _read(cfg.json_dir, "relations.json", "10-relations")
 
     frames = _pick(segmentation["shots"], cfg.caption_frames)
-    hints = _hints(aggregated["shots"], profile, relations, cfg.identikit_attention)
+    hints = _hints(aggregated, profile, relations, cfg)
     images = [_image(cfg.out_root / f["path"], cfg.caption_size) for f in frames]
 
     repo = download_models.CAPTIONERS[cfg.caption_model]

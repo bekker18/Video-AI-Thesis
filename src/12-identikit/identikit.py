@@ -468,7 +468,7 @@ def run(cfg: Config) -> dict[str, Any]:
             **{k: caption_meta[k] for k in ("words", "clip_score", "unsupported")},
         }
         provenance["figurative.caption"] = (
-            f"11 {caption_meta['model']} on 02 keyframes, with hints from 03, 05, 06, 09 and 10"
+            f"11 {caption_meta['model']} on 02 keyframes, with hints from 02, 03, 05, 06, 07, 09 and 10"
         )
     shots = aggregated["shots"]
     at_once = {int(s["index"]): int(s["counts"]["person_max"]) for s in profile["shots"]}
