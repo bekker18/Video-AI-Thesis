@@ -1,9 +1,9 @@
-﻿"""02-segmentation: split a video into shots with OmniShotCut, then pick representative
-keyframes per shot with MobileCLIP. Reads the video directly; 01-sampling is not required."""
+﻿"""02-segmentation: shots with OmniShotCut, keyframes with MobileCLIP, camera movement per shot."""
 
 from __future__ import annotations
 
 import json
+import math
 import shutil
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -24,6 +24,10 @@ DUPLICATE = 0.98  # cosine above this counts as the same picture
 SHARP_POOL = (
     0.25  # fraction of the most representative frames to pick the sharpest from
 )
+CORNERS = 200  # tracked per frame pair for camera motion
+MIN_POINTS = 10  # tracked corners a motion estimate needs
+STILL = 0.05  # net pan, tilt or log zoom over a shot below which the camera did not move
+SHAKE = 0.004  # per-frame translation spread, as a share of width, that reads as handheld
 
 
 def _device(name: str) -> str:
@@ -37,7 +41,7 @@ def _device(name: str) -> str:
 
 
 def _load_shot_model(checkpoint: Path) -> tuple[Any, tuple[int, int]]:
-    """Also reports the resolution the model works at, so frames are only resized once."""
+    """Also returns the model's working resolution, so frames are resized once."""
     import omnishotcut
 
     model = omnishotcut.load(str(checkpoint))
@@ -60,8 +64,7 @@ def _detect_shots(
 
 
 def _normalise(ranges: list[list[int]], frame_count: int) -> list[tuple[int, int]]:
-    """OmniShotCut reports a shared frame between neighbours ([0,33] then [33,108]) and can
-    run one past the end. Make the ranges disjoint and in bounds."""
+    """Disjoint, in-bounds ranges: OmniShotCut shares a frame between neighbours and can overrun."""
     shots: list[tuple[int, int]] = []
     ordered = sorted((int(s), int(e)) for s, e in ranges)
     for i, (start, end) in enumerate(ordered):
@@ -73,16 +76,57 @@ def _normalise(ranges: list[list[int]], frame_count: int) -> list[tuple[int, int
     return shots or [(0, frame_count - 1)]
 
 
-def _sharpness(frame: Array) -> float:
+def _sharpness(gray: Array) -> float:
     """Variance of the Laplacian; low means blurred or mid-motion."""
-    return float(
-        cv2.Laplacian(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), cv2.CV_32F).var()
-    )
+    return float(cv2.Laplacian(gray, cv2.CV_32F).var())
+
+
+def _motion(before: Array, after: Array) -> tuple[float, float, float] | None:
+    """LK flow on corners, then a RANSAC similarity: translation as a share of width, log scale."""
+    points = cv2.goodFeaturesToTrack(before, CORNERS, 0.01, 8)
+    if points is None or len(points) < MIN_POINTS:
+        return None
+    moved, status, _ = cv2.calcOpticalFlowPyrLK(before, after, points, np.empty(0))
+    good = status.ravel() == 1
+    if int(good.sum()) < MIN_POINTS:
+        return None
+    matrix, _ = cv2.estimateAffinePartial2D(points[good], moved[good], method=cv2.RANSAC)
+    if matrix is None:
+        return None
+    width = before.shape[1]
+    scale = math.hypot(float(matrix[0, 0]), float(matrix[1, 0]))
+    return float(matrix[0, 2]) / width, float(matrix[1, 2]) / width, math.log(scale)
+
+
+def _camera(steps: list[tuple[float, float, float] | None]) -> dict[str, Any]:
+    """Net pan, tilt and zoom over a shot; directions are the camera's, opposite to the content's."""
+    known = [s for s in steps if s is not None]
+    if len(known) < 2:
+        return {"movement": "unknown", "direction": None, "pairs": len(known)}
+    tx, ty, scale = (np.asarray(v) for v in zip(*known))
+    pan, tilt, zoom = float(tx.sum()), float(ty.sum()), float(scale.sum())
+    jitter = float(tx.std() + ty.std())
+    if max(abs(pan), abs(tilt)) < STILL and abs(zoom) < STILL:
+        movement, direction = ("handheld" if jitter > SHAKE else "static"), None
+    elif abs(zoom) >= max(abs(pan), abs(tilt)):
+        movement, direction = "zoom", ("in" if zoom > 0 else "out")
+    elif abs(pan) >= abs(tilt):
+        movement, direction = "pan", ("right" if pan < 0 else "left")
+    else:
+        movement, direction = "tilt", ("down" if tilt < 0 else "up")
+    return {
+        "movement": movement,
+        "direction": direction,
+        "pan": round(pan, 4),
+        "tilt": round(tilt, 4),
+        "zoom": round(zoom, 4),
+        "jitter": round(jitter, 4),
+        "pairs": len(known),
+    }
 
 
 def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
-    """Read the crop size and normalisation out of open_clip's transform, so the same
-    preprocessing can be done with OpenCV instead of PIL."""
+    """Crop size and normalisation from open_clip's transform, to redo it in OpenCV."""
     crop, mean, std = 256, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
     for step in getattr(preprocess, "transforms", []):
         size = getattr(step, "size", None)
@@ -95,10 +139,8 @@ def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
 
 def _scan(
     video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int]
-) -> tuple[Array, Array, Array, float]:
-    """Single decode pass. Each frame feeds three things: the small array OmniShotCut runs on,
-    a MobileCLIP embedding, and a sharpness score. Full frames are never accumulated, so
-    memory stays flat regardless of video length."""
+) -> tuple[Array, Array, Array, list[tuple[float, float, float] | None], float]:
+    """One decode pass feeding OmniShotCut, MobileCLIP, sharpness and camera motion; no full frames kept."""
     import open_clip
     import torch
 
@@ -119,6 +161,8 @@ def _scan(
     shot_frames: list[Array] = []
     vectors: list[Array] = []
     sharp: list[float] = []
+    motions: list[tuple[float, float, float] | None] = []  # frame i to i + 1
+    previous: Array | None = None
     batch: list[Array] = []
 
     def flush() -> None:
@@ -141,7 +185,7 @@ def _scan(
         if not ok:
             break
 
-        # One downscale of the full frame, reused by all three consumers below.
+        # One downscale of the full frame, reused by every consumer below.
         height, width = frame.shape[:2]
         ratio = crop / min(height, width)
         mid = cv2.resize(
@@ -160,7 +204,11 @@ def _scan(
                 cv2.COLOR_BGR2RGB,
             )
         )
-        sharp.append(_sharpness(mid))
+        gray = cv2.cvtColor(mid, cv2.COLOR_BGR2GRAY)
+        sharp.append(_sharpness(gray))
+        if previous is not None:
+            motions.append(_motion(previous, gray))
+        previous = gray
 
         if len(batch) == BATCH:
             flush()
@@ -174,14 +222,13 @@ def _scan(
         np.asarray(shot_frames, dtype=np.uint8),
         np.concatenate(vectors),
         np.asarray(sharp),
+        motions,
         fps,
     )
 
 
 def _select(embeddings: Array, sharp: Array, start: int, end: int, k: int) -> list[int]:
-    """Split the shot into k spans and take one frame from each, so the keyframes cover the
-    whole shot instead of clustering on a single instant. Within a span, choose the sharpest
-    of the frames that best match that span's average appearance."""
+    """One keyframe per equal time span: the sharpest of the frames closest to the span's mean."""
     length = end - start + 1
     count = max(1, min(k, length))
     bounds = np.linspace(0, length, count + 1).astype(int)
@@ -242,7 +289,7 @@ def run(cfg: Config) -> dict[str, Any]:
     device = _device(cfg.device)
     shot_model, shot_size = _load_shot_model(cfg.model_dir / SHOT_CKPT)
 
-    shot_frames, embeddings, sharp, fps = _scan(
+    shot_frames, embeddings, sharp, motions, fps = _scan(
         cfg.video, device, cfg.model_dir, shot_size
     )
     frame_count = len(shot_frames)
@@ -287,6 +334,7 @@ def run(cfg: Config) -> dict[str, Any]:
             "end_time": round((end + 1) / fps, 3),
             "first_frame": f"{shots_dir.name}/{first.name}",
             "keyframes": keyframes,
+            "camera": _camera(motions[start:end]),  # pairs inside the shot only
         }
         if index < len(intra):
             shot["intra_label"] = intra[index]
@@ -306,6 +354,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "shot_overlap": cfg.shot_overlap,
         "shot_model": SHOT_REPO,
         "embed_model": CLIP_MODEL,
+        "camera_model": "LK flow on corners, RANSAC similarity",
         "device": device,
         "shots": shots,
     }

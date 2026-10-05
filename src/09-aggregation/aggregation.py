@@ -1,5 +1,4 @@
-"""09-aggregation: per-person records over 08's global persons, from raw samples, and
-per-segment records of the plastic timeline, text and objects. Every statistic carries its n."""
+"""09-aggregation: per-person and per-segment records from raw samples; every statistic carries its n."""
 
 from __future__ import annotations
 
@@ -32,6 +31,8 @@ CLASSICAL_KEYS = (
 )
 PALETTE = 6  # colours kept per segment
 IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the frame
+LIVE = "live action"  # the only medium perceived ethnicity is read in
+TAXONOMY = "FairFace-7"
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -140,6 +141,74 @@ def _pose_summary(samples: list[dict[str, Any]], floor: float) -> dict[str, Any]
     }
 
 
+def _address(samples: list[dict[str, Any]], cone: float) -> dict[str, Any]:
+    """Share of samples with the head within `cone` of the camera axis and the gaze off the frame."""
+    looks = [s for s in samples if "head_pose" in s and "gaze" in s]
+    if not looks:
+        return {"n": 0}
+    hits = sum(
+        1
+        for s in looks
+        if abs(float(s["head_pose"]["yaw"])) <= cone
+        and abs(float(s["head_pose"]["pitch"])) <= cone
+        and float(s["gaze"]["in_frame"]) < IN_FRAME
+    )
+    return {"n": len(looks), "share": round(hits / len(looks), 3)}
+
+
+def _top(scores: dict[str, float]) -> str:
+    return max(scores.items(), key=lambda kv: kv[1])[0]
+
+
+def _in_bracket(age: float, bracket: str) -> bool:
+    low, _, high = bracket.rstrip("+").partition("-")
+    return float(low) <= age < (float(high) + 1 if high else float("inf"))
+
+
+def _ethnicity(
+    entries: list[dict[str, Any]],
+    crops: dict[int, tuple[int, dict[str, Any]]],
+    live: set[int],
+    cfg: Config,
+) -> dict[str, Any]:
+    """FairFace's perceived groups, from face crops that clear 08's floors in live-action segments."""
+    kept: list[dict[str, float]] = []
+    footage = quality = 0
+    for entry in entries:
+        segment, crop = crops[int(entry["frame"])]
+        if segment not in live:
+            footage += 1
+        elif float(crop["area"]) < cfg.identity_min_area or float(
+            crop["frontality"] or 0.0
+        ) < cfg.identity_min_front:
+            quality += 1
+        else:
+            kept.append(entry["ethnicity"])
+    found = _distribution(kept, tuple(kept[0])) if kept else {"n": 0}
+    return {
+        "taxonomy": TAXONOMY,
+        **found,
+        "withheld": {"not_live_action": footage, "low_quality": quality},
+    }
+
+
+def _cross_check(
+    gender_age: list[dict[str, Any]], fairface: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """InsightFace genderage against FairFace's gender and age heads, crop by crop."""
+    theirs = {int(f["frame"]): f for f in fairface}
+    pairs = [(g, theirs[int(g["frame"])]) for g in gender_age if int(g["frame"]) in theirs]
+    if not pairs:
+        return {"n": 0}
+    gender = sum(1 for g, f in pairs if g["gender"] == _top(f["gender"]))
+    age = sum(1 for g, f in pairs if _in_bracket(float(g["age"]), _top(f["age"])))
+    return {
+        "n": len(pairs),
+        "gender_agreement": round(gender / len(pairs), 3),
+        "age_in_bracket": round(age / len(pairs), 3),
+    }
+
+
 def _affect(emotions: list[dict[str, Any]]) -> dict[str, Any]:
     if not emotions:
         return {}
@@ -181,6 +250,8 @@ def _person(
     series: list[dict[str, Any]],
     spans: list[tuple[int, dict[str, Any]]],
     attrs: dict[str, list[Any]],
+    crops: dict[int, tuple[int, dict[str, Any]]],
+    live: set[int],
     fps: float,
     cfg: Config,
 ) -> dict[str, Any]:
@@ -234,6 +305,9 @@ def _person(
             "in_frame": _stats(inside),
             "in_frame_share": round(sum(1 for p in inside if p >= IN_FRAME) / len(inside), 3),
         }
+    address = _address(series, cfg.address_deg)
+    if address["n"]:
+        record["address"] = address
 
     pose = _pose_summary(series, cfg.pose_vis)
     if pose["n"]:
@@ -257,7 +331,10 @@ def _person(
                 "confidence": round(float(np.mean(confidence)), 4),
                 "n": sum(votes.values()),
             },
+            "cross_check": _cross_check(attrs["gender_age"], attrs.get("fairface", [])),
         }
+    if attrs.get("fairface"):
+        record["perceived_ethnicity"] = _ethnicity(attrs["fairface"], crops, live, cfg)
     if attrs.get("clip"):
         record["attributes"] = _labelled(attrs["clip"], cfg.agg_top)
 
@@ -282,6 +359,13 @@ def _plastic(keyframes: list[dict[str, Any]], cfg: Config) -> dict[str, Any]:
         )
         for key in CLASSICAL_KEYS
     }
+    # 8-bit Lab centres a*, b* on 128; warmth is b* (+yellow), tint a* (+magenta)
+    lab = [k["classical"]["mean_lab"] for k in keyframes]
+    out["visual"]["warmth"] = _stats([float(v[2]) - 128.0 for v in lab])
+    out["visual"]["tint"] = _stats([float(v[1]) - 128.0 for v in lab])
+    mediums = [k["medium"] for k in keyframes if k.get("medium")]
+    if mediums:
+        out["medium"] = _distribution(mediums, tuple(mediums[0]))
 
     depth = [k["depth"] for k in keyframes if k.get("depth")]
     if depth:
@@ -416,8 +500,7 @@ def _frame_size(cfg: Config, tracks_meta: dict[str, Any]) -> tuple[int, int]:
 
 
 def _framing(shot: dict[str, Any], size: tuple[int, int]) -> dict[str, Any]:
-    """Per observed frame, the largest face and body as a share of frame height and the faces'
-    area against the rest of the frame; a frame without a face counts as zero."""
+    """Per observed frame: largest face and body as a share of frame height, faces against the rest."""
     width, height = size
     rows_at: dict[int, list[dict[str, Any]]] = {}
     for track in shot.get("tracks", []):
@@ -477,8 +560,11 @@ def run(cfg: Config) -> dict[str, Any]:
     by_shot: dict[int, list[dict[str, Any]]] = {}
     for keyframe in global_meta["keyframes"]:
         by_shot.setdefault(int(keyframe["shot"]), []).append(keyframe)
+    plastic = {int(s["index"]): _plastic(by_shot.get(int(s["index"]), []), cfg) for s in conditional["shots"]}
+    live = {i for i, p in plastic.items() if (p.get("medium") or {}).get("modal") == LIVE}
 
     persons: list[dict[str, Any]] = []
+    everyone: list[dict[str, Any]] = []
     thin = 0
     for person in identity["persons"]:
         keys = [(int(t["segment"]), int(t["track_id"])) for t in person["tracks"]]
@@ -492,9 +578,12 @@ def run(cfg: Config) -> dict[str, Any]:
             "embedding_rows": [],
             "body_rows": [],
             "gender_age": [],
+            "fairface": [],
             "clip": [],
         }
+        crops: dict[int, tuple[int, dict[str, Any]]] = {}  # frames are unique within a person
         for key in present:
+            crops.update({int(c["frame"]): (key[0], c) for c in spans[key]["crops"]["face"]})
             source = tracks_by_key.get(key)
             if source is None:
                 continue
@@ -502,8 +591,11 @@ def run(cfg: Config) -> dict[str, Any]:
             for field, values in source.get("attributes", {}).items():
                 attrs.setdefault(field, []).extend(values)
         series.sort(key=lambda s: (int(s["segment"]), int(s["frame"])))
+        everyone += series
 
-        record = _person(person, series, [(k[0], spans[k]) for k in present], attrs, fps, cfg)
+        record = _person(
+            person, series, [(k[0], spans[k]) for k in present], attrs, crops, live, fps, cfg
+        )
         if record["support"]["series"] < 2:
             thin += 1
         persons.append(record)
@@ -513,10 +605,14 @@ def run(cfg: Config) -> dict[str, Any]:
         for segment in record["segments"]:
             by_segment.setdefault(int(segment), []).append(int(record["person_id"]))
 
+    cameras = {int(s["index"]): s.get("camera") for s in segmentation["shots"]}
+    stride = max(1, int(tracks_meta["det_stride"]))
     shots: list[dict[str, Any]] = []
     for shot in conditional["shots"]:
         index = int(shot["index"])
         source = next(s for s in tracks_meta["shots"] if int(s["index"]) == index)
+        start, end = int(shot["start_frame"]), int(shot["end_frame"])
+        detected = len(range(start, end + 1, stride)) + (1 if (end - start) % stride else 0)
         shots.append(
             {
                 "index": index,
@@ -529,10 +625,18 @@ def run(cfg: Config) -> dict[str, Any]:
                 "experts": gates.get(index, []),
                 "tracked": bool(source["tracked"]),
                 "person_ids": sorted(by_segment.get(index, [])),
-                "plastic": _plastic(by_shot.get(index, []), cfg),
+                "plastic": plastic[index],
+                "camera": cameras.get(index),
                 "text": _text(shot["text"]),
-                "objects": source.get("objects", []),
+                # share of the detection frames 06 ran on that saw the class
+                "objects": [
+                    {**o, "share": round(int(o["frame_count"]) / detected, 3)}
+                    for o in source.get("objects", [])
+                ],
                 "framing": _framing(source, size),
+                "address": _address(
+                    [s for s in everyone if int(s["segment"]) == index], cfg.address_deg
+                ),
             }
         )
 
@@ -544,6 +648,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "multi_segment_persons": sum(1 for p in persons if len(p["segments"]) > 1),
         "frame_size": list(size),
         "pose_vis_floor": cfg.pose_vis,
+        "address_degrees": cfg.address_deg,
         "top_k": cfg.agg_top,
         "note": (
             "records are video-scoped: one per global person from 08, over every track it was resolved from"

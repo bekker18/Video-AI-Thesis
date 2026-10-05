@@ -90,6 +90,7 @@ tracks/          best crops per track  (06)
 | `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor       |
 | `--agg-top 10`                | `10`           | labels kept per distribution in 09                            |
 | `--pose-vis 0.5`              | `0.5`          | visibility a joint must reach to count in 09                  |
+| `--address-deg 15`            | `15`           | head-pose cone around the camera axis that counts as address  |
 | `--attention-deg 30`          | `30`           | cone width within which a head counts as attending someone    |
 | `--sync-min 5`                | `5`            | shared affect samples a synchrony edge needs                  |
 | `--caption-model qwen3-vl-4b` | `qwen3-vl-2b`  | captioner used by 11                                          |
@@ -97,6 +98,7 @@ tracks/          best crops per track  (06)
 | `--caption-size 448`          | `448`          | longest side of each keyframe given to the captioner          |
 | `--identikit-attention 0.5`   | `0.5`          | attention share a relation needs before 12 lists it           |
 | `--identikit-labels 3`        | `3`            | labels kept per segment and per person in the identikit       |
+| `--subject-min 0.25`          | `0.25`         | share of a segment's detection frames an animal needs to be a subject |
 
 ## The identikit
 

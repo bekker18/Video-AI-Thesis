@@ -84,6 +84,7 @@ class Config:
     # 09-aggregation
     agg_top: int  # labels kept per distribution
     pose_vis: float  # visibility a joint must reach to count
+    address_deg: float  # head-pose cone around the camera axis for direct address
 
     # 10-relations
     attention_deg: float  # cone width for "attends to"
@@ -97,6 +98,7 @@ class Config:
     # 12-identikit
     identikit_attention: float  # attention share a relation needs before it is listed
     identikit_labels: int  # labels kept per segment and per person
+    subject_min: float  # share of a segment's detection frames an animal needs to be a subject
 
     @property
     def json_dir(self) -> Path:

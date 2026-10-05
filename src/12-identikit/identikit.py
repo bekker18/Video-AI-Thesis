@@ -1,5 +1,4 @@
-"""12-identikit: the terminal artifact, assembled from what 03, 08, 09, 10 and 11 wrote.
-Measures nothing, and never opens tracks.json or conditional.json."""
+"""12-identikit: the terminal artifact, assembled from 03, 08, 09, 10 and 11; measures nothing."""
 
 from __future__ import annotations
 
@@ -33,8 +32,7 @@ CONTRADICTS = {
 # Banded on how many 03 saw at once, not how many 08 followed: crowdedness describes the frame.
 CROWD = ((0, "none"), (1, "single"), (2, "couple"), (5, "group"))
 
-# Shot scale on the segment's median largest face and body height, as a share of frame height.
-# First match wins, else "extreme long"; the bands follow the usual shot sizes.
+# Shot scale on the median largest face, else body, height; first match wins, else "extreme long".
 SCALE: tuple[tuple[str, str, float], ...] = (
     ("extreme close-up", "face_height", 0.75),
     ("close-up", "face_height", 0.30),
@@ -44,13 +42,14 @@ SCALE: tuple[tuple[str, str, float], ...] = (
 )
 GRAYSCALE = 0.01  # weighted chroma; a grey keyframe re-encoded as JPEG reads 0.0, the dullest colour clip 0.03
 PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
+WARM = 5.0  # mean b* beyond which a segment reads warm, or below its negative cool
+ANIMALS = frozenset(
+    {"bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"}
+)
 
 PENDING: dict[str, str] = {}
 
-EXCLUDED: dict[str, str] = {
-    "ethnicity": "left out deliberately: a perceived category against a fixed taxonomy, "
-    "with error rates that differ across groups",
-}
+EXCLUDED: dict[str, str] = {}
 
 PROVENANCE: dict[str, str] = {
     "timeline": "02 shot boundaries and 08 person ids, via 09",
@@ -61,6 +60,16 @@ PROVENANCE: dict[str, str] = {
     "plastic.segments[].depth": "05 Depth Anything V2 under Mask2Former segments, via 09",
     "plastic.video.colour_histogram": "05 RGB histograms, via 09, duration-weighted",
     "plastic.video.grayscale": "05 chroma, via 09, duration-weighted, against GRAYSCALE",
+    "plastic.segments[].medium": "05 MobileCLIP zero-shot on 02's keyframe embeddings, via 09",
+    "plastic.video.medium": "05 MobileCLIP zero-shot, via 09, duration-weighted",
+    "plastic.segments[].temperature": "05 mean Lab b* per keyframe, via 09, against WARM",
+    "figurative.subjects": "06 YOLO11 temporal union of animal classes, via 09, against --subject-min",
+    "figurative.persons[].perceived_ethnicity": "07 FairFace ResNet-34 on live-action face crops "
+    "clearing 08's floors, via 09",
+    "figurative.persons[].demographic_check": "07 InsightFace genderage against FairFace, via 09",
+    "enunciative.persons[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
+    "enunciative.segments[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
+    "enunciative.segments[].camera": "02 LK flow on corners and a RANSAC similarity, via 09",
     "figurative.segments[].indoor_outdoor": "05 Places365 ResNet-18 with Places365's IO list, via 09",
     "figurative.segments[].tags": "05 MobileCLIP against RAM's tag list, via 09",
     "figurative.segments[].place": "05 Places365 ResNet-18, via 09",
@@ -101,6 +110,13 @@ CAVEATS: tuple[str, ...] = (
     "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
     "confidence is banded on time-series samples; crop-based fields carry their own n",
     "the caption is written by a VLM; `unsupported` lists objects it names that no detector found",
+    "perceived_ethnicity is FairFace's reading against its own 7 groups, not a property of a person; "
+    "it is read on live-action faces only, and photoreal CGI passes that gate",
+    "medium separates 2D animation well; photoreal CGI reads as live action",
+    "address is the head turned to the lens with the gaze off the frame, not a measured eye contact",
+    "camera movement is one global similarity per frame pair: a large moving subject can read as a pan",
+    "temperature is the keyframes' mean colour, so grading counts as much as light",
+    "subjects are animal classes the detector saw often enough, neither tracked nor told apart",
 )
 
 
@@ -250,6 +266,48 @@ def _gaze(person: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _counted(found: dict[str, Any] | None, keys: tuple[str, ...]) -> dict[str, Any] | None:
+    """The named keys of a 09 block, or null when it rests on no samples."""
+    if not found or not found.get("n"):
+        return None
+    return {k: found[k] for k in keys}
+
+
+def _temperature(warmth: float | None) -> str | None:
+    if warmth is None:
+        return None
+    return "warm" if warmth > WARM else ("cool" if warmth < -WARM else "neutral")
+
+
+def _medium(mediums: list[tuple[dict[str, float], float]]) -> dict[str, Any] | None:
+    """Segment distributions weighted by duration."""
+    total = sum(seconds for _, seconds in mediums)
+    if not mediums or total <= 0:
+        return None
+    mix = {
+        k: round(sum(d[k] * seconds for d, seconds in mediums) / total, 4)
+        for k in mediums[0][0]
+    }
+    return {"label": max(mix.items(), key=lambda kv: kv[1])[0], "distribution": mix}
+
+
+def _subjects(
+    shots: list[dict[str, Any]], lengths: list[float], floor: float
+) -> list[dict[str, Any]]:
+    """Animals seen in at least `floor` of a segment's detection frames; seconds are share x duration."""
+    found: dict[str, dict[str, Any]] = {}
+    for shot, seconds in zip(shots, lengths):
+        for o in shot.get("objects", []):
+            if o["label"] in ANIMALS and float(o["share"]) >= floor:
+                entry = found.setdefault(o["label"], {"label": o["label"], "segments": [], "seconds": 0.0})
+                entry["segments"].append(int(shot["index"]))
+                entry["seconds"] += float(o["share"]) * seconds
+    return sorted(
+        ({**e, "seconds": round(e["seconds"], 2)} for e in found.values()),
+        key=lambda e: (-e["seconds"], e["label"]),
+    )
+
+
 def _person(
     person: dict[str, Any], links: list[dict[str, Any]], keep: int
 ) -> tuple[dict[str, Any], list[str]]:
@@ -270,6 +328,13 @@ def _person(
         "gender": {k: gender[k] for k in ("label", "agreement", "confidence", "n")}
         if gender
         else None,
+        "perceived_ethnicity": _counted(
+            person.get("perceived_ethnicity"),
+            ("taxonomy", "modal", "agreement", "distribution", "n"),
+        ),
+        "demographic_check": _counted(
+            demographics.get("cross_check"), ("gender_agreement", "age_in_bracket", "n")
+        ),
         "attributes": attributes,
         "emotion": {k: emotion[k] for k in ("modal", "agreement", "n", "distribution")}
         if emotion.get("n")
@@ -425,19 +490,39 @@ def run(cfg: Config) -> dict[str, Any]:
     heads: list[dict[str, Any]] = []
     tracked_only: list[int] = []
     conflicts: list[dict[str, Any]] = []
+    ethnicity_withheld: list[dict[str, Any]] = []
     for person in aggregated["persons"]:
         pid = int(person["person_id"])
         record, dropped = _person(person, links_of.get(pid, []), keep)
         head_pose = _head_pose(person)
-        measured = ("age", "gender", "attributes", "emotion", "valence", "arousal", "movement")
+        measured = (
+            "age",
+            "gender",
+            "perceived_ethnicity",
+            "attributes",
+            "emotion",
+            "valence",
+            "arousal",
+            "movement",
+        )
         if not any(record[k] for k in measured) and head_pose is None:
             tracked_only.append(pid)
             continue
         described.append(record)
         if head_pose is not None:
-            heads.append({"person_id": pid, "head_pose": head_pose, "gaze": _gaze(person)})
+            heads.append(
+                {
+                    "person_id": pid,
+                    "head_pose": head_pose,
+                    "gaze": _gaze(person),
+                    "address": _counted(person.get("address"), ("share", "n")),
+                }
+            )
         if dropped:
             conflicts.append({"person_id": pid, "dropped": dropped})
+        withheld = person.get("perceived_ethnicity")
+        if withheld and not withheld["n"]:
+            ethnicity_withheld.append({"person_id": pid, **withheld["withheld"]})
 
     timeline_segments: list[dict[str, Any]] = []
     plastic_segments: list[dict[str, Any]] = []
@@ -445,6 +530,8 @@ def run(cfg: Config) -> dict[str, Any]:
     enunciative_segments: list[dict[str, Any]] = []
     weighted: dict[str, list[tuple[float, float]]] = {}
     histograms: list[tuple[dict[str, list[float]], float]] = []
+    mediums: list[tuple[dict[str, float], float]] = []
+    moves: dict[str, float] = {}
     for shot, seconds in zip(shots, lengths):
         index = int(shot["index"])
         plastic = shot["plastic"]
@@ -468,10 +555,18 @@ def run(cfg: Config) -> dict[str, Any]:
             weighted.setdefault(key, []).append((float(value), seconds))
         if plastic.get("histogram"):
             histograms.append((plastic["histogram"], seconds))
+        medium = plastic.get("medium") or {}
+        if medium.get("n"):
+            mediums.append((medium["distribution"], seconds))
+        camera = shot.get("camera") or {}
+        if camera.get("movement"):
+            moves[camera["movement"]] = moves.get(camera["movement"], 0.0) + seconds
         coverage = ((plastic.get("semantic") or {}).get("coverage")) or {}
         plastic_segments.append(
             {
                 "segment": index,
+                "medium": _counted(medium, ("modal", "agreement", "n")),
+                "temperature": _temperature(visual.get("warmth")),
                 "visual": visual,
                 "coverage": {name: c["mean"] for name, c in coverage.items()},
                 "palette": [
@@ -493,7 +588,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 ],
                 "indoor_outdoor": _indoor_outdoor(plastic),
                 "objects": [
-                    {"label": o["label"], "frames": o["frame_count"]}
+                    {"label": o["label"], "frames": o["frame_count"], "share": o["share"]}
                     for o in shot.get("objects", [])
                 ],
                 "text": _text(shot["text"], bound_text.get(index, []), keep),
@@ -509,11 +604,16 @@ def run(cfg: Config) -> dict[str, Any]:
                 "followed": followed,
                 "assessment": _assess(at_once.get(index, 0), followed),
                 **_framing(shot.get("framing") or {}),
+                "address": _counted(shot.get("address"), ("share", "n")),
+                "camera": {k: camera[k] for k in ("movement", "direction")} if camera else None,
             }
         )
 
     video_visual = {key: _weighted(values) for key, values in weighted.items()}
     chroma = video_visual.get("chroma")
+    warmth = video_visual.get("warmth")
+    video_medium = _medium(mediums)
+    subjects = _subjects(shots, lengths, cfg.subject_min)
     kept = [
         _relation(r)
         for r in relations["relations"]
@@ -533,6 +633,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "frames": frames,
             "fps": round(frames / duration, 2) if duration else None,
             "segments": len(shots),
+            "medium": video_medium["label"] if video_medium else None,
+            "subjects": len(subjects),
             "persons": {
                 "resolved": len(persons),
                 "described": len(described),
@@ -579,6 +681,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "video": {
                 **video_visual,
                 "grayscale": float(chroma["mean"]) < GRAYSCALE if chroma else None,
+                "temperature": _temperature(float(warmth["mean"])) if warmth else None,
+                "medium": video_medium,
                 "colour_histogram": _histogram(histograms),
             },
             "segments": plastic_segments,
@@ -586,6 +690,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "figurative": {
             "caption": caption,
             "segments": figurative_segments,
+            "subjects": subjects,
             "persons": described,
             "tracked_only": {"count": len(tracked_only), "ids": tracked_only},
         },
@@ -593,6 +698,13 @@ def run(cfg: Config) -> dict[str, Any]:
             "persons": heads,
             "relations": kept,
             "segments": enunciative_segments,
+            # share of running time per camera movement
+            "camera": {
+                k: round(v / duration, 3)
+                for k, v in sorted(moves.items(), key=lambda kv: (-kv[1], kv[0]))
+            }
+            if duration
+            else {},
         },
         "provenance": provenance,
         "gaps": {
@@ -607,6 +719,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 e["segment"] for e in enunciative_segments if e["assessment"] == "under_tracked"
             ],
             "attribute_conflicts": conflicts,
+            "ethnicity_withheld": ethnicity_withheld,
             "face_outside_body": relations["face_outside_body"],
             "caveats": list(CAVEATS),
         },

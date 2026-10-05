@@ -1,5 +1,4 @@
-"""05-global-experts: the plastic, always-on branch, run on 02's keyframes. Models load one at
-a time; panoptic segment indices are per-keyframe geometry, never identity."""
+"""05-global-experts: the plastic, always-on branch on 02's keyframes, one model at a time."""
 
 from __future__ import annotations
 
@@ -30,6 +29,14 @@ HISTOGRAM_BINS = 16  # per RGB channel
 PALETTE_LEVELS = 8  # per channel, so 512 fixed colour cells
 PALETTE_KEPT = 8  # cells kept per keyframe
 THINGS = 80  # COCO panoptic ids below this are countable objects, the rest is stuff
+
+# two prompts per medium, averaged
+MEDIUM = {
+    "live action": ("a photo of a real scene", "a frame from live-action video footage"),
+    "2D animation": ("a frame from a 2D anime cartoon", "a hand-drawn animated cartoon"),
+    "CGI": ("a 3D computer-generated CGI render", "a frame from a 3D animated film"),
+}
+CLIP_SCALE = 100.0  # CLIP's logit scale
 
 
 def _device(name: str) -> str:
@@ -311,8 +318,8 @@ def _scene(
 
 def _tags(
     embeddings: Array, device: str, model_dir: Path, clip_cache: Path, top: int
-) -> list[list[dict[str, Any]]]:
-    """Zero-shot against RAM's tag vocabulary over 02's keyframe embeddings; no image is read."""
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, float]]]:
+    """Zero-shot tags from RAM's vocabulary and the medium, over 02's keyframe embeddings."""
     import open_clip
     import torch
 
@@ -328,18 +335,21 @@ def _tags(
     tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
     model = model.to(device).eval()
 
-    chunks: list[Array] = []
-    with torch.no_grad():
-        for i in range(0, len(vocabulary), 256):
-            tokens = tokenizer([f"a photo of {t}" for t in vocabulary[i : i + 256]]).to(
-                device
-            )
-            features = model.encode_text(tokens).float()
-            features /= features.norm(dim=-1, keepdim=True)
-            chunks.append(features.cpu().numpy())
+    def encode(prompts: list[str]) -> Array:
+        chunks: list[Array] = []
+        with torch.no_grad():
+            for i in range(0, len(prompts), 256):
+                tokens = tokenizer(prompts[i : i + 256]).to(device)
+                features = model.encode_text(tokens).float()
+                features /= features.norm(dim=-1, keepdim=True)
+                chunks.append(features.cpu().numpy())
+        return np.concatenate(chunks)
+
+    tag_text = encode([f"a photo of {t}" for t in vocabulary])
+    medium_text = encode([p for pair in MEDIUM.values() for p in pair])
     _free(model)
 
-    scores = embeddings @ np.concatenate(chunks).T
+    scores = embeddings @ tag_text.T
     out: list[list[dict[str, Any]]] = []
     for row in scores:
         order = np.argsort(-row)[:top]
@@ -349,7 +359,16 @@ def _tags(
                 for k in order
             ]
         )
-    return out
+
+    centres = medium_text.reshape(len(MEDIUM), 2, -1).mean(axis=1)
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    logits = CLIP_SCALE * embeddings @ centres.T
+    probs = np.exp(logits - logits.max(axis=1, keepdims=True))
+    probs /= probs.sum(axis=1, keepdims=True)
+    medium = [
+        {name: round(float(p), 4) for name, p in zip(MEDIUM, row)} for row in probs
+    ]
+    return out, medium
 
 
 def _semantic(
@@ -523,10 +542,10 @@ def run(cfg: Config) -> dict[str, Any]:
         record["outdoor"] = share
 
     embeddings: Array = np.load(cfg.embeddings_dir / "keyframe_embeddings.npy")
-    for record, tags in zip(
-        records, _tags(embeddings, device, cfg.model_dir, clip_cache, cfg.tags)
-    ):
-        record["tags"] = tags
+    tags, mediums = _tags(embeddings, device, cfg.model_dir, clip_cache, cfg.tags)
+    for record, tag, medium in zip(records, tags, mediums):
+        record["tags"] = tag
+        record["medium"] = medium
 
     semantic_maps, semantic_names = _semantic(
         images, device, cfg.model_dir, cfg.seg_model, batch
@@ -565,6 +584,7 @@ def run(cfg: Config) -> dict[str, Any]:
             "edges": "PiDiNet",
             "scene": "places365-resnet18",
             "tags": CLIP_MODEL,
+            "medium": CLIP_MODEL,
             "semantic": download_models.SEGFORMERS[cfg.seg_model].repo,
             "panoptic": PANOPTIC_MODEL,
         },

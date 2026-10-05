@@ -1,18 +1,4 @@
-"""07-conditional-experts: the gated figurative and enunciative experts.
-
-Runs only where 04-router fired the matching expert, and consumes what 06 indexed rather
-than the video wherever possible: attribute crops and text regions are already on disk.
-
-Two sampling rates, because the consumers differ. Cheap, fast-moving experts (head pose,
-blendshapes, emotion, pose) run on a stride across a track's observed rows and produce
-the series 09 takes variance over. Expensive, slow-moving ones (face and body embeddings, age,
-gender, attributes) run on the handful of ranked crops 06 already selected.
-Nothing runs on an interpolated row - those are position estimates, not observations.
-
-The two embeddings are what 08-identity clusters into global person ids.
-They are not interchangeable: ArcFace identifies a person and reaches a minority of tracks,
-body appearance reaches nearly all of them and identifies an outfit under one lighting.
-"""
+"""07-conditional-experts: gated experts, as a series over observed rows and on 06's ranked crops."""
 
 from __future__ import annotations
 
@@ -38,6 +24,7 @@ ARCFACE_MODEL = "w600k_r50.onnx"
 GENDERAGE_MODEL = "genderage.onnx"
 OCR_MODEL = "text_crnn_en.onnx"
 REID_MODEL = "reid_youtu.onnx"
+FAIRFACE_MODEL = "res34_fair_align_multi_7_20190809.pt"
 CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
@@ -55,6 +42,21 @@ EMOTIONS = (
 OCR_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
 REID_INPUT = (128, 256)  # width, height
 REID_BATCH = 16
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
+
+# FairFace's head order
+FAIRFACE_GROUPS = (
+    "White",
+    "Black",
+    "Latino/Hispanic",
+    "East Asian",
+    "Southeast Asian",
+    "Indian",
+    "Middle Eastern",
+)
+FAIRFACE_AGES = ("0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+")
+FAIRFACE_BATCH = 32
 
 # insightface's 5-point template for a 112x112 aligned face.
 ARCFACE_TEMPLATE = np.array(
@@ -129,9 +131,14 @@ def _crop(image: Array, box: list[int], pad: float = 0.0) -> Array:
 
 
 def _new_entry() -> dict[str, Any]:
-    """Per-crop outputs for one track. Always all four keys,
-    so a track reached by only one of the two crop kinds still reads the same downstream."""
-    return {"embedding_rows": [], "body_rows": [], "gender_age": [], "clip": []}
+    """Per-crop outputs for one track, always with every key."""
+    return {
+        "embedding_rows": [],
+        "body_rows": [],
+        "gender_age": [],
+        "fairface": [],
+        "clip": [],
+    }
 
 
 def _series_rows(track: dict[str, Any], stride: int) -> list[dict[str, Any]]:
@@ -218,8 +225,7 @@ def _face_pass(landmarker: Any, crop: Array, top: int) -> dict[str, Any] | None:
 
 
 def _five_points(landmarks: list[Any], size: tuple[int, int]) -> Array:
-    """Eye, nose and mouth points for ArcFace alignment, ordered by image x so the
-    template's left/right assignment holds regardless of landmark index semantics."""
+    """Eye, nose and mouth points for ArcFace alignment, ordered by image x."""
     width, height = size
     eyes = (468, 473) if len(landmarks) >= 478 else (33, 263)
 
@@ -251,8 +257,7 @@ def _pose_pass(landmarker: Any, crop: Array) -> dict[str, Any] | None:
 def _session(path: Path) -> Any:
     import onnxruntime
 
-    # CPU only: these models are small, and onnxruntime's CUDA build would have to agree
-    # with torch's on cuDNN, which is the conflict 03 avoided by not taking paddlepaddle.
+    # CPU only: onnxruntime's CUDA build would have to agree with torch's on cuDNN.
     return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
 
 
@@ -266,9 +271,7 @@ def _emotion_pass(session: Any, crop: Array) -> dict[str, Any] | None:
         ).astype(np.float32)
         / 255.0
     )
-    rgb = (rgb - np.array([0.485, 0.456, 0.406], np.float32)) / np.array(
-        [0.229, 0.224, 0.225], np.float32
-    )
+    rgb = (rgb - IMAGENET_MEAN) / IMAGENET_STD
     tensor = rgb.transpose(2, 0, 1)[None]
     raw = np.asarray(session.run(None, {session.get_inputs()[0].name: tensor})[0])[0]
 
@@ -299,10 +302,7 @@ def _embed_face(session: Any, aligned: Array) -> Array:
 
 
 def _embed_bodies(session: Any, crops: list[Array]) -> Array:
-    """YouTu ReID over 06's body crops. This is the descriptor 08-identity actually runs on:
-    a face embedding exists for a minority of tracks, a body crop for nearly all."""
-    mean = np.array([0.485, 0.456, 0.406], np.float32)
-    std = np.array([0.229, 0.224, 0.225], np.float32)
+    """YouTu ReID over 06's body crops, the descriptor most of 08's links run on."""
     out: list[Array] = []
     for start in range(0, len(crops), REID_BATCH):
         batch = np.stack(
@@ -313,9 +313,9 @@ def _embed_bodies(session: Any, crops: list[Array]) -> Array:
                         cv2.COLOR_BGR2RGB,
                     ).astype(np.float32)
                     / 255.0
-                    - mean
+                    - IMAGENET_MEAN
                 )
-                / std
+                / IMAGENET_STD
                 for c in crops[start : start + REID_BATCH]
             ]
         ).transpose(0, 3, 1, 2)
@@ -357,9 +357,7 @@ def _recogniser(model_dir: Path) -> Any:
 
 
 def _read_text(model: Any, crop: Array) -> str:
-    """CRNN reads roughly ten characters at 100x32, but 03's detector returns whole caption
-    lines running to 13:1, which squash to nothing. The crop is normalised to the model's
-    height and read in chunks; boundaries cut words, so parts are joined with a space."""
+    """Read in ~10-character chunks at the CRNN's height; whole caption lines squash to nothing."""
     grey = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     height = 32
     width = max(8, round(grey.shape[1] * height / grey.shape[0]))
@@ -435,6 +433,42 @@ def _clip_attributes(
     return out
 
 
+def _fairface(crops: list[Array], device: str, path: Path) -> list[dict[str, Any]]:
+    """FairFace's three softmax heads on 224 crops aligned to the ArcFace template, scaled x2."""
+    import torch
+    from torchvision.models import resnet34
+
+    model = resnet34(num_classes=18)
+    model.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
+    model = model.to(device).eval()
+
+    out: list[dict[str, Any]] = []
+    with torch.no_grad():
+        for start in range(0, len(crops), FAIRFACE_BATCH):
+            batch = np.stack(
+                [
+                    (cv2.cvtColor(c, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0 - IMAGENET_MEAN)
+                    / IMAGENET_STD
+                    for c in crops[start : start + FAIRFACE_BATCH]
+                ]
+            ).transpose(0, 3, 1, 2)
+            logits = model(torch.from_numpy(batch).to(device)).float().cpu()
+            heads = [logits[:, a:b].softmax(dim=-1).numpy() for a, b in ((0, 7), (7, 9), (9, 18))]
+            for groups, gender, age in zip(*heads):
+                out.append(
+                    {
+                        "ethnicity": {k: round(float(p), 4) for k, p in zip(FAIRFACE_GROUPS, groups)},
+                        "gender": {k: round(float(p), 4) for k, p in zip(("male", "female"), gender)},
+                        "age": {k: round(float(p), 4) for k, p in zip(FAIRFACE_AGES, age)},
+                    }
+                )
+
+    del model
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    return out
+
+
 def _gaze_model(device: str) -> tuple[Any, Any]:
     import torch
 
@@ -463,8 +497,7 @@ def _head_box(face: list[int], width: int, height: int) -> tuple[float, float, f
 def _gaze_pass(
     gaze: tuple[Any, Any], image: Array, faces: list[list[int]], device: str
 ) -> list[dict[str, Any]]:
-    """One pass per frame for all its faces: the heatmap peak as the look-at point in frame pixels,
-    and the probability that what is looked at is inside the frame."""
+    """All faces of a frame in one pass: heatmap peak in frame pixels, and the in-frame probability."""
     import torch
     from PIL import Image
 
@@ -556,8 +589,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     )
                     if found:
                         sample.update(found)
-                        # The emotion model has no "not a face" answer - it classifies whatever
-                        # it is handed - so it runs only where the mesh confirms a face.
+                        # HSEmotion has no "not a face" answer, so only where the mesh found one
                         if emotion is not None:
                             feeling = _emotion_pass(emotion, crop)
                             if feeling:
@@ -606,6 +638,8 @@ def run(cfg: Config) -> dict[str, Any]:
 
         clip_crops: list[Array] = []
         clip_keys: list[tuple[int, int]] = []
+        fair_crops: list[Array] = []
+        fair_keys: list[tuple[int, int, int]] = []
         for shot, track_id, frame, path in attribute_jobs:
             image = cv2.imread(str(path))
             if image is None:
@@ -626,15 +660,16 @@ def run(cfg: Config) -> dict[str, Any]:
             )
 
             entry = per_track.setdefault((shot, track_id), _new_entry())
-            # The row is recorded against the crop it came from: not every crop yields an embedding,
-            # so row order alone does not identify one.
-            # 08 gates on crop quality and needs to know which crop each vector is.
+            # keyed by crop frame: not every crop yields a row, and 08 gates by crop
             entry["embedding_rows"].append({"row": len(embeddings), "frame": frame})
             embeddings.append(_embed_face(arcface, aligned))
-            entry["gender_age"].append(_gender_age(genderage, aligned))
-            # CLIP reads the unaligned crop; the 112x112 warp is for ArcFace only.
-            clip_crops.append(image)
+            entry["gender_age"].append({"frame": frame, **_gender_age(genderage, aligned)})
+            clip_crops.append(image)  # CLIP reads the unaligned crop
             clip_keys.append((shot, track_id))
+            fair_crops.append(
+                cv2.warpAffine(image, matrix * 2, (224, 224), borderValue=(0.0, 0.0, 0.0))
+            )
+            fair_keys.append((shot, track_id, frame))
 
         if clip_crops:
             found = _clip_attributes(
@@ -642,6 +677,9 @@ def run(cfg: Config) -> dict[str, Any]:
             )
             for key, labels in zip(clip_keys, found):
                 per_track[key]["clip"].append(labels)
+            heads = _fairface(fair_crops, device, model_dir / FAIRFACE_MODEL)
+            for (shot, track_id, frame), result in zip(fair_keys, heads):
+                per_track[(shot, track_id)]["fairface"].append({"frame": frame, **result})
 
     body_jobs: list[tuple[int, int, int, Path]] = []
     for shot in tracks_meta["shots"]:
@@ -768,13 +806,13 @@ def run(cfg: Config) -> dict[str, Any]:
             "identity": ARCFACE_MODEL,
             "gender_age": GENDERAGE_MODEL,
             "body_appearance": REID_MODEL,
+            "perceived_ethnicity": f"FairFace ResNet-34, {FAIRFACE_MODEL}",
             "ocr": OCR_MODEL,
             "attributes": CLIP_MODEL,
             "gaze": f"{download_models.GAZE_MODEL} at {download_models.GAZE_REPO}",
         },
         "note": "series samples are observations only; interpolated rows are never measured",
-        # Recorded rather than silently skipped: the router fires object_masks,
-        # and nothing here answers it. SAM 2 is a separate dependency and is not installed.
+        # routed but unanswered: SAM 2 is not installed
         "not_implemented": ["object_masks"],
         "shots": shots,
     }
