@@ -216,6 +216,12 @@ def parse_args() -> argparse.Namespace:
         default=0.5,
         help="visibility a joint must reach to count in 09",
     )
+    p.add_argument(
+        "--address-deg",
+        type=float,
+        default=15.0,
+        help="head-pose cone around the camera axis that counts as direct address in 09",
+    )
 
     p.add_argument(
         "--attention-deg",
@@ -256,6 +262,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="labels kept per segment and per person in the identikit",
+    )
+    p.add_argument(
+        "--subject-min",
+        type=float,
+        default=0.25,
+        help="share of a segment's detection frames an animal needs to be a subject in 12",
     )
     return p.parse_args()
 
@@ -325,6 +337,7 @@ def main() -> None:
             identity_min_front=args.identity_min_front,
             agg_top=args.agg_top,
             pose_vis=args.pose_vis,
+            address_deg=args.address_deg,
             attention_deg=args.attention_deg,
             sync_min=args.sync_min,
             caption_model=args.caption_model,
@@ -332,6 +345,7 @@ def main() -> None:
             caption_size=args.caption_size,
             identikit_attention=args.identikit_attention,
             identikit_labels=args.identikit_labels,
+            subject_min=args.subject_min,
         )
         started = time.perf_counter()  # includes the weights check, part of a stage's real cost
         download_models.ensure(name)

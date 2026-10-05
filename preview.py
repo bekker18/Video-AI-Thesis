@@ -1,9 +1,4 @@
-"""Renders the output of 06, 07, 08 and 10 back over the source video, and draws 12's
-identikit as a page.
-
-python3 preview.py messi
-python3 preview.py messi --views relations identikit
-"""
+"""Renders 06, 07, 08 and 10 over the source video and draws 12's identikit as a page: preview.py messi [--views ...]"""
 
 from __future__ import annotations
 
@@ -571,10 +566,7 @@ def _relations_view(root: Path) -> Draw:
 
 
 def _identity_view(root: Path) -> Draw:
-    """The same boxes as the tracks view, labelled with 08's person id instead of 06's
-    track id. Rendered side by side with tracks_preview.mp4 it shows what was merged and
-    what was left alone, which is the only check on this stage that does not need a
-    ground-truth annotation."""
+    """The tracks view's boxes labelled with 08's person id, to read against tracks_preview.mp4."""
     tracks = _load(root, "tracks.json", "06-detection-tracking")
     con = _load(root, "identity.json", "08-identity")
     shot_of = _shot_map(tracks)
@@ -862,6 +854,12 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
     chroma = video.get("chroma")
     grey_text = "unknown" if grey is None else ("yes" if grey else "no")
     c.text(f"Grayscale: {grey_text}" + (f" · chroma {chroma['mean']:.3f}" if chroma else ""))
+    medium = video.get("medium")
+    warmth = video.get("warmth")
+    c.text(
+        f"Medium: {medium['label'] if medium else 'unknown'} · temperature {video.get('temperature') or 'unknown'}"
+        + (f", b* {warmth['mean']:+.1f}" if warmth else "")
+    )
     for key, label in (("brightness", "Brightness"), ("saturation", "Saturation")):
         stats = video.get(key)
         if stats:
@@ -956,6 +954,14 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
     if p.get("gender"):
         g = p["gender"]
         lines.append(f"Gender {g['label']}, agreement {g['agreement']:.0%} (n={g['n']})")
+    if p.get("perceived_ethnicity"):
+        e = p["perceived_ethnicity"]
+        lines.append(f"Perceived ethnicity {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']}, {e['taxonomy']})")
+    if p.get("demographic_check"):
+        d = p["demographic_check"]
+        lines.append(
+            f"FairFace check: gender agrees {d['gender_agreement']:.0%}, age in bracket {d['age_in_bracket']:.0%} (n={d['n']})"
+        )
     if p.get("emotion"):
         e = p["emotion"]
         lines.append(f"Emotion {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']})")
@@ -964,6 +970,9 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
         lines.append(f"Head yaw {yaw['mean']:.1f} deg{_sd(yaw)} (n={yaw['n']})")
     if gaze:
         lines.append(f"Gaze inside the frame {gaze['in_frame_share']:.0%} (n={gaze['n']})")
+    address = (watch or {}).get("address")
+    if address:
+        lines.append(f"Looks into the camera {address['share']:.0%} (n={address['n']})")
     per = [
         f"seg {b['segment']} {b['emotion']['modal']} {round(b['emotion']['agreement'] * b['emotion']['n'])}/{b['emotion']['n']}"
         for b in p.get("by_segment") or []
@@ -1006,6 +1015,13 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
         c.text(f"+{len(segments) - 4} more segments", size=9, colour=MUTED)
 
     c.heading("Content participants")
+    subjects = figurative.get("subjects") or []
+    if subjects:
+        c.text(
+            "Non-human subjects: "
+            + ", ".join(f"{s['label']} {s['seconds']:.1f} s" for s in subjects),
+            size=10,
+        )
     persons = sorted(figurative["persons"], key=lambda p: (-int(p["support"]["series"]), int(p["person_id"])))
     heads = {h["person_id"]: h for h in kit["enunciative"]["persons"]}
     for p in persons[:2]:
@@ -1076,7 +1092,15 @@ def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
 
 def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
     size = 9.0
-    columns = (("seg", 0.0), ("visible", 0.028), ("followed", 0.075), ("shot", 0.125), ("framing", 0.2), ("check", 0.245))
+    columns = (
+        ("seg", 0.0),
+        ("visible", 0.022),
+        ("followed", 0.062),
+        ("shot", 0.105),
+        ("camera", 0.16),
+        ("framing", 0.195),
+        ("check", 0.232),
+    )
     for label, dx in columns:
         c.fig.text(c.x + dx, c.y, label, fontsize=size, color=MUTED, va="top")
     c.y -= size * LINE
@@ -1085,11 +1109,13 @@ def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
         if not c.room(2 * size * LINE):
             break
         distance = s.get("camera_distance")
+        camera = s.get("camera") or {}
         cells = (
             str(s["segment"]),
             str(s["visible_at_once"]),
             str(s["followed"]),
             distance["scale"] if distance else "-",
+            " ".join(v for v in (camera.get("movement"), camera.get("direction")) if v) or "-",
             s.get("portrait_scene") or "-",
             CHECK.get(s["assessment"], s["assessment"]),
         )
@@ -1121,7 +1147,19 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
         c.text(f"Gaze for {_count(len(gazes), 'person')}: inside the frame in {inside:.0%} of {samples} samples")
     else:
         c.text("Gaze: none measured", colour=MUTED)
+    addressed = [p for p in persons if p.get("address")]
+    looks = sum(int(p["address"]["n"]) for p in addressed)
+    if looks:
+        share = sum(float(p["address"]["share"]) * int(p["address"]["n"]) for p in addressed) / looks
+        mostly = [f"P{p['person_id']}" for p in addressed if p["address"]["share"] >= 0.5 and p["address"]["n"] >= 2]
+        c.text(
+            f"Looks into the camera in {share:.0%} of {looks} samples"
+            + (f"; mostly {', '.join(mostly[:6])}" if mostly else "")
+        )
     c.heading("Framing per segment")
+    moves = kit["enunciative"].get("camera") or {}
+    if moves:
+        c.text("Camera: " + ", ".join(f"{k} {v:.0%}" for k, v in moves.items()), size=9.5)
     _framing_table(c, kit["enunciative"]["segments"])
 
 

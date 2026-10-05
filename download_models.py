@@ -1,8 +1,4 @@
-"""Downloads model weights into models/<stage>/. Already-present files are reused.
-
-Runs automatically from main.py, or standalone:
-    python3 download_models.py [stage ...]
-"""
+"""Downloads model weights into models/<stage>/, reusing what is there. Standalone: python3 download_models.py [stage ...]"""
 
 from __future__ import annotations
 
@@ -45,8 +41,7 @@ class Archive:
     members: tuple[str, ...]
 
 
-# Selectable by --seg-model. B1 and B2 ship only a pickle on main, which transformers will not
-# load under torch 2.5; the pinned revisions are the Hub's own safetensors conversions.
+# Selectable by --seg-model; B1 and B2 are pinned to the Hub's safetensors conversions.
 SEGFORMERS: dict[str, Model] = {
     "segformer-b0": Model("nvidia/segformer-b0-finetuned-ade-512-512"),
     "segformer-b1": Model(
@@ -69,6 +64,14 @@ MODELS: dict[str, tuple[Model, ...]] = {
         Model("depth-anything/Depth-Anything-V2-Small-hf"),
         SEGFORMERS[DEFAULT_SEGFORMER],
         Model("facebook/mask2former-swin-tiny-coco-panoptic"),
+    ),
+    # official FairFace checkpoint, mirrored from Google Drive
+    "07-conditional-experts": (
+        Model(
+            "anning01/fairface",
+            "res34_fair_align_multi_7_20190809.pt",
+            revision="2f3694ee5c86e230f08d5f81d839a20f0f809b2d",
+        ),
     ),
 }
 
@@ -163,8 +166,7 @@ BACKBONES: dict[str, tuple[str, ...]] = {
 GAZE_REPO = "fkryan/gazelle:2d78f9f3bd2a5db360354954ec1a4c526ee8ab55"
 GAZE_MODEL = "gazelle_dinov2_vitb14_inout"
 
-# Torch hub code, fetched without GitHub API validation: unauthenticated calls are rate-limited,
-# and once a repo is cached, a later unvalidated load of it by name makes no call at all.
+# Torch hub code, fetched without GitHub API validation, which is rate-limited when unauthenticated.
 HUB_REPOS: dict[str, tuple[str, ...]] = {
     "07-conditional-experts": ("facebookresearch/dinov2", GAZE_REPO),
 }
@@ -236,7 +238,12 @@ def ensure(stage: str) -> None:
                 if checkpoint(stage, model.filename).exists():
                     continue
                 print(f"[{stage}] downloading {model.repo}/{model.filename}")
-                hf_hub_download(model.repo, model.filename, local_dir=str(model_dir))
+                hf_hub_download(
+                    model.repo,
+                    model.filename,
+                    revision=model.revision,
+                    local_dir=str(model_dir),
+                )
             else:
                 # snapshot_download only fetches files missing from the cache.
                 snapshot_download(
