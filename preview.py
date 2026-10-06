@@ -656,7 +656,9 @@ CHECK = {
 class Column:
     """Writes top-down in figure coordinates and stops at its floor."""
 
-    def __init__(self, fig: Figure, x: float, top: float, width: float, floor: float) -> None:
+    def __init__(
+        self, fig: Figure, x: float, top: float, width: float, floor: float
+    ) -> None:
         self.fig, self.x, self.y, self.width, self.floor = fig, x, top, width, floor
 
     def room(self, height: float) -> bool:
@@ -675,7 +677,13 @@ class Column:
             if not self.room(size * LINE):
                 return
             self.fig.text(
-                self.x + indent, self.y, line, fontsize=size, color=colour, weight=weight, va="top"
+                self.x + indent,
+                self.y,
+                line,
+                fontsize=size,
+                color=colour,
+                weight=weight,
+                va="top",
             )
             self.y -= size * LINE
 
@@ -687,7 +695,9 @@ class Column:
     def axes(self, height: float, indent: float = 0.0) -> Axes | None:
         if not self.room(height):
             return None
-        ax = self.fig.add_axes((self.x + indent, self.y - height, self.width - indent, height))
+        ax = self.fig.add_axes(
+            (self.x + indent, self.y - height, self.width - indent, height)
+        )
         _bare(ax)
         self.y -= height + 0.006
         return ax
@@ -717,9 +727,24 @@ def _box(fig: Figure, rect: tuple[float, float, float, float], title: str) -> Co
             zorder=-1,
         )
     )
-    fig.text(x + w / 2, y + h - 0.012, title, ha="center", va="top", fontsize=17, weight="bold", color=INK)
+    fig.text(
+        x + w / 2,
+        y + h - 0.012,
+        title,
+        ha="center",
+        va="top",
+        fontsize=17,
+        weight="bold",
+        color=INK,
+    )
     fig.add_artist(
-        Line2D([x + 0.01, x + w - 0.01], [y + h - 0.047] * 2, transform=fig.transFigure, color=HAIRLINE, linewidth=1)
+        Line2D(
+            [x + 0.01, x + w - 0.01],
+            [y + h - 0.047] * 2,
+            transform=fig.transFigure,
+            color=HAIRLINE,
+            linewidth=1,
+        )
     )
     return Column(fig, x + 0.012, y + h - 0.056, w - 0.024, y + 0.008)
 
@@ -728,7 +753,14 @@ def _legend(c: Column, items: list[tuple[str, str]], size: float = 9.5) -> None:
     x = c.x
     for colour, label in items:
         c.fig.add_artist(
-            Rectangle((x, c.y - 0.012), 0.007, 0.011, transform=c.fig.transFigure, facecolor=colour, edgecolor="none")
+            Rectangle(
+                (x, c.y - 0.012),
+                0.007,
+                0.011,
+                transform=c.fig.transFigure,
+                facecolor=colour,
+                edgecolor="none",
+            )
         )
         c.fig.text(x + 0.010, c.y, label, fontsize=size, color=SECONDARY, va="top")
         x += 0.022 + len(label) * size * 0.8 / (PAGE_SIZE[0] * 100)
@@ -746,7 +778,9 @@ def _count(n: int, word: str) -> str:
 def _header(fig: Figure, kit: dict[str, Any], name: str) -> None:
     s = kit["summary"]
     fps = f" @ {s['fps']:g} fps" if s.get("fps") else ""
-    fig.text(0.018, 0.988, "Video identikit", fontsize=26, weight="bold", color=INK, va="top")
+    fig.text(
+        0.018, 0.988, "Video identikit", fontsize=26, weight="bold", color=INK, va="top"
+    )
     fig.text(
         0.018,
         0.95,
@@ -765,7 +799,9 @@ def _header(fig: Figure, kit: dict[str, Any], name: str) -> None:
     )
     for i, (label, value) in enumerate(tiles):
         x = 0.54 + i * 0.09
-        fig.text(x, 0.985, str(value), fontsize=28, weight="semibold", color=INK, va="top")
+        fig.text(
+            x, 0.985, str(value), fontsize=28, weight="semibold", color=INK, va="top"
+        )
         fig.text(x, 0.94, label, fontsize=10.5, color=MUTED, va="top")
 
 
@@ -776,24 +812,68 @@ def _timeline(fig: Figure, kit: dict[str, Any]) -> None:
     duration = float(kit["summary"]["duration_s"]) or 1.0
     left, width = 0.105, 0.87
 
-    fig.text(0.027, 0.874, "SEGMENTS", fontsize=10.5, weight="bold", color=SECONDARY, va="top")
+    fig.text(
+        0.027,
+        0.874,
+        "SEGMENTS",
+        fontsize=10.5,
+        weight="bold",
+        color=SECONDARY,
+        va="top",
+    )
     rhythm_text = f"{_count(rhythm['shots'], 'shot')}\nmean {rhythm['mean_s']:.2f} s\n{rhythm['shots_per_minute']:.1f} per min"
-    fig.text(0.027, 0.856, rhythm_text, fontsize=9, color=MUTED, va="top", linespacing=1.4)
+    fig.text(
+        0.027, 0.856, rhythm_text, fontsize=9, color=MUTED, va="top", linespacing=1.4
+    )
     band = fig.add_axes((left, 0.845, width, 0.03))
     _bare(band)
     band.set_xlim(0, duration)
     band.set_ylim(0, 1)
     for s in segments:
         band.add_patch(
-            Rectangle((s["start"], 0), s["seconds"], 1, facecolor=SEGMENT_FILL, edgecolor=SURFACE, linewidth=2)
+            Rectangle(
+                (s["start"], 0),
+                s["seconds"],
+                1,
+                facecolor=SEGMENT_FILL,
+                edgecolor=SURFACE,
+                linewidth=2,
+            )
         )
         if s["seconds"] / duration * width * PAGE_SIZE[0] * 100 >= 18:
-            band.text(s["start"] + s["seconds"] / 2, 0.5, str(s["segment"]), ha="center", va="center", fontsize=9, color=INK)
+            band.text(
+                s["start"] + s["seconds"] / 2,
+                0.5,
+                str(s["segment"]),
+                ha="center",
+                va="center",
+                fontsize=9,
+                color=INK,
+            )
     for t in np.linspace(0, duration, 7):
-        fig.text(left + width * float(t) / duration, 0.84, f"{t:.1f} s", fontsize=8.5, color=MUTED, ha="center", va="top")
+        fig.text(
+            left + width * float(t) / duration,
+            0.84,
+            f"{t:.1f} s",
+            fontsize=8.5,
+            color=MUTED,
+            ha="center",
+            va="top",
+        )
 
-    fig.text(0.027, 0.812, "PRESENCE", fontsize=10.5, weight="bold", color=SECONDARY, va="top")
-    persons = sorted(kit["timeline"]["presence"], key=lambda p: (-float(p["seconds"]), int(p["person_id"])))
+    fig.text(
+        0.027,
+        0.812,
+        "PRESENCE",
+        fontsize=10.5,
+        weight="bold",
+        color=SECONDARY,
+        va="top",
+    )
+    persons = sorted(
+        kit["timeline"]["presence"],
+        key=lambda p: (-float(p["seconds"]), int(p["person_id"])),
+    )
     shown = persons[:8]
     if not shown:
         fig.text(left, 0.79, "nobody was followed", fontsize=10, color=MUTED, va="top")
@@ -806,9 +886,26 @@ def _timeline(fig: Figure, kit: dict[str, Any]) -> None:
     for row, p in enumerate(shown):
         for segment in p["segments"]:
             start, seconds = span[segment]
-            ax.barh(row, seconds, left=start, height=0.55, color=SERIES[0], edgecolor=SURFACE, linewidth=1)
+            ax.barh(
+                row,
+                seconds,
+                left=start,
+                height=0.55,
+                color=SERIES[0],
+                edgecolor=SURFACE,
+                linewidth=1,
+            )
         label = f"P{p['person_id']}  {p['seconds']:.1f} s"
-        ax.text(-duration * 0.004, row, label, ha="right", va="center", fontsize=8.5, color=SECONDARY, clip_on=False)
+        ax.text(
+            -duration * 0.004,
+            row,
+            label,
+            ha="right",
+            va="center",
+            fontsize=8.5,
+            color=SECONDARY,
+            clip_on=False,
+        )
 
     notes: list[str] = []
     if len(persons) > len(shown):
@@ -819,11 +916,23 @@ def _timeline(fig: Figure, kit: dict[str, Any]) -> None:
         if any(b - a > 1 for a, b in itertools.pairwise(sorted(p["segments"])))
     ]
     if back:
-        notes.append(f"{', '.join(back[:6])} reappear after an absence: one person across segments, resolved by 08")
-    fig.text(left, 0.716, " · ".join(notes), fontsize=9, color=MUTED, style="italic", va="top")
+        notes.append(
+            f"{', '.join(back[:6])} reappear after an absence: one person across segments, resolved by 08"
+        )
+    fig.text(
+        left,
+        0.716,
+        " · ".join(notes),
+        fontsize=9,
+        color=MUTED,
+        style="italic",
+        va="top",
+    )
 
 
-def _spark_row(c: Column, label: str, xs: list[float], ys: list[Any], span: float) -> None:
+def _spark_row(
+    c: Column, label: str, xs: list[float], ys: list[Any], span: float
+) -> None:
     height = 0.03
     if not c.room(height):
         return
@@ -833,8 +942,23 @@ def _spark_row(c: Column, label: str, xs: list[float], ys: list[Any], span: floa
     points = [(x, float(y)) for x, y in zip(xs, ys) if y is not None]
     if points:
         px, py = [p[0] for p in points], [p[1] for p in points]
-        ax.plot(px, py, color=SERIES[0], linewidth=2, solid_capstyle="round", solid_joinstyle="round")
-        ax.plot(px[-1:], py[-1:], "o", color=SERIES[0], markersize=6, markeredgecolor=SURFACE, markeredgewidth=1.5)
+        ax.plot(
+            px,
+            py,
+            color=SERIES[0],
+            linewidth=2,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+        )
+        ax.plot(
+            px[-1:],
+            py[-1:],
+            "o",
+            color=SERIES[0],
+            markersize=6,
+            markeredgecolor=SURFACE,
+            markeredgewidth=1.5,
+        )
         pad = (max(py) - min(py)) * 0.2 or 0.01
         ax.set_xlim(0, span)
         ax.set_ylim(min(py) - pad, max(py) + pad)
@@ -853,7 +977,10 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
     grey = video.get("grayscale")
     chroma = video.get("chroma")
     grey_text = "unknown" if grey is None else ("yes" if grey else "no")
-    c.text(f"Grayscale: {grey_text}" + (f" · chroma {chroma['mean']:.3f}" if chroma else ""))
+    c.text(
+        f"Grayscale: {grey_text}"
+        + (f" · chroma {chroma['mean']:.3f}" if chroma else "")
+    )
     medium = video.get("medium")
     warmth = video.get("warmth")
     c.text(
@@ -864,7 +991,9 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
         stats = video.get(key)
         if stats:
             values = [s["visual"].get(key) for s in segments]
-            _spark_row(c, f"{label} {stats['mean']:.3f}{_sd(stats, 3)}", mids, values, duration)
+            _spark_row(
+                c, f"{label} {stats['mean']:.3f}{_sd(stats, 3)}", mids, values, duration
+            )
     c.text("Palette, per segment", colour=SECONDARY)
     ax = c.axes(0.045)
     if ax is not None:
@@ -876,11 +1005,29 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
             top = 1.0
             for p in colours:
                 h = float(p["share"]) / total
-                ax.add_patch(Rectangle((i, top - h), 1, h, facecolor=p["hex"], edgecolor=SURFACE, linewidth=1.5))
+                ax.add_patch(
+                    Rectangle(
+                        (i, top - h),
+                        1,
+                        h,
+                        facecolor=p["hex"],
+                        edgecolor=SURFACE,
+                        linewidth=1.5,
+                    )
+                )
                 top -= h
         step = max(1, math.ceil(len(segments) / 14))
         for i in range(0, len(segments), step):
-            ax.text(i + 0.5, -0.06, str(segments[i]["segment"]), ha="center", va="top", fontsize=8, color=MUTED, clip_on=False)
+            ax.text(
+                i + 0.5,
+                -0.06,
+                str(segments[i]["segment"]),
+                ha="center",
+                va="top",
+                fontsize=8,
+                color=MUTED,
+                clip_on=False,
+            )
         c.y -= 0.012
 
     c.heading("Rhythm and montage")
@@ -903,7 +1050,12 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
     for s, t in zip(segments, timeline):
         for name, share in s["coverage"].items():
             weight[name] = weight.get(name, 0.0) + float(share) * float(t["seconds"])
-    classes = [k for k, _ in sorted(weight.items(), key=lambda kv: (-kv[1], kv[0]))[: len(SERIES)]]
+    classes = [
+        k
+        for k, _ in sorted(weight.items(), key=lambda kv: (-kv[1], kv[0]))[
+            : len(SERIES)
+        ]
+    ]
     c.text("Spatial coverage per segment", colour=SECONDARY)
     ax = c.axes(min(0.075, 0.0085 * len(segments) + 0.012), indent=0.018)
     if ax is not None:
@@ -912,28 +1064,74 @@ def _plastic_column(fig: Figure, kit: dict[str, Any]) -> None:
             for k, name in enumerate(classes):
                 share = float(s["coverage"].get(name, 0.0))
                 if share:
-                    ax.barh(row, share, left=start, height=0.8, color=SERIES[k], edgecolor=SURFACE, linewidth=1)
+                    ax.barh(
+                        row,
+                        share,
+                        left=start,
+                        height=0.8,
+                        color=SERIES[k],
+                        edgecolor=SURFACE,
+                        linewidth=1,
+                    )
                 start += share
-            ax.barh(row, max(0.0, 1.0 - start), left=start, height=0.8, color=BASELINE, edgecolor=SURFACE, linewidth=1)
+            ax.barh(
+                row,
+                max(0.0, 1.0 - start),
+                left=start,
+                height=0.8,
+                color=BASELINE,
+                edgecolor=SURFACE,
+                linewidth=1,
+            )
         ax.set_xlim(0, 1)
         ax.set_ylim(len(segments) - 0.5, -0.5)
-        fit = max(1, int(ax.get_position().height * PAGE_SIZE[1] * 100 / 12))  # one label per 12 px
+        fit = max(
+            1, int(ax.get_position().height * PAGE_SIZE[1] * 100 / 12)
+        )  # one label per 12 px
         step = max(1, math.ceil(len(segments) / fit))
         for row in range(0, len(segments), step):
-            ax.text(-0.01, row, str(segments[row]["segment"]), ha="right", va="center", fontsize=7.5, color=MUTED, clip_on=False)
-        _legend(c, [(SERIES[k], name.strip()) for k, name in enumerate(classes)] + [(BASELINE, "other")])
+            ax.text(
+                -0.01,
+                row,
+                str(segments[row]["segment"]),
+                ha="right",
+                va="center",
+                fontsize=7.5,
+                color=MUTED,
+                clip_on=False,
+            )
+        _legend(
+            c,
+            [(SERIES[k], name.strip()) for k, name in enumerate(classes)]
+            + [(BASELINE, "other")],
+        )
 
     if not c.room(2 * 10.5 * LINE):
         return
     c.text("Objects near to far, relative depth", colour=SECONDARY)
     busy = [s for s in segments if s.get("depth") and s["depth"]["objects"]]
-    busy = sorted(sorted(busy, key=lambda s: -len(s["depth"]["objects"]))[:4], key=lambda s: s["segment"])
+    busy = sorted(
+        sorted(busy, key=lambda s: -len(s["depth"]["objects"]))[:4],
+        key=lambda s: s["segment"],
+    )
     for s in busy:
         d = s["depth"]
-        background = f" · background {d['background']:.2f}" if d["background"] is not None else ""
+        background = (
+            f" · background {d['background']:.2f}"
+            if d["background"] is not None
+            else ""
+        )
         main = s["centralities"][0] if s["centralities"] else None
-        where = f" · {main['label']} {main['horizontal']} {main['vertical']}, {main['area']:.0%}" if main else ""
-        c.text(f"seg {s['segment']}: {' > '.join(d['order'][:4])}{background}{where}", size=9.5, indent=0.006)
+        where = (
+            f" · {main['label']} {main['horizontal']} {main['vertical']}, {main['area']:.0%}"
+            if main
+            else ""
+        )
+        c.text(
+            f"seg {s['segment']}: {' > '.join(d['order'][:4])}{background}{where}",
+            size=9.5,
+            indent=0.006,
+        )
     if not busy:
         c.text("no objects found", size=9.5, colour=MUTED)
 
@@ -953,10 +1151,14 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
         lines.append(f"Age {p['age']['mean']:.1f}{_sd(p['age'])} (n={p['age']['n']})")
     if p.get("gender"):
         g = p["gender"]
-        lines.append(f"Gender {g['label']}, agreement {g['agreement']:.0%} (n={g['n']})")
+        lines.append(
+            f"Gender {g['label']}, agreement {g['agreement']:.0%} (n={g['n']})"
+        )
     if p.get("perceived_ethnicity"):
         e = p["perceived_ethnicity"]
-        lines.append(f"Perceived ethnicity {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']}, {e['taxonomy']})")
+        lines.append(
+            f"Perceived ethnicity {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']}, {e['taxonomy']})"
+        )
     if p.get("demographic_check"):
         d = p["demographic_check"]
         lines.append(
@@ -964,12 +1166,16 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
         )
     if p.get("emotion"):
         e = p["emotion"]
-        lines.append(f"Emotion {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']})")
+        lines.append(
+            f"Emotion {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']})"
+        )
     yaw = (head or {}).get("yaw")
     if yaw:
         lines.append(f"Head yaw {yaw['mean']:.1f} deg{_sd(yaw)} (n={yaw['n']})")
     if gaze:
-        lines.append(f"Gaze inside the frame {gaze['in_frame_share']:.0%} (n={gaze['n']})")
+        lines.append(
+            f"Gaze inside the frame {gaze['in_frame_share']:.0%} (n={gaze['n']})"
+        )
     address = (watch or {}).get("address")
     if address:
         lines.append(f"Looks into the camera {address['share']:.0%} (n={address['n']})")
@@ -999,7 +1205,10 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
             colour=MUTED,
         )
     else:
-        c.text(f"not available: {kit['gaps']['pending'].get('figurative.caption', '')}", colour=MUTED)
+        c.text(
+            f"not available: {kit['gaps']['pending'].get('figurative.caption', '')}",
+            colour=MUTED,
+        )
 
     c.heading("Per segment")
     times = {s["segment"]: s for s in kit["timeline"]["segments"]}
@@ -1008,9 +1217,17 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
         t = times[s["segment"]]
         io = s.get("indoor_outdoor")
         place = s["place"][0]["label"] if s["place"] else "no place"
-        where = f"{io['label']} {io['outdoor']:.2f}" if io else "indoor or outdoor unknown"
-        c.text(f"seg {s['segment']} · {t['start']:.1f}-{t['end']:.1f} s · {where} · {place} · {s['crowdedness']}", size=9.5, weight="bold")
-        c.text(", ".join(s["tags"]) or "no tags", size=9.5, colour=SECONDARY, indent=0.008)
+        where = (
+            f"{io['label']} {io['outdoor']:.2f}" if io else "indoor or outdoor unknown"
+        )
+        c.text(
+            f"seg {s['segment']} · {t['start']:.1f}-{t['end']:.1f} s · {where} · {place} · {s['crowdedness']}",
+            size=9.5,
+            weight="bold",
+        )
+        c.text(
+            ", ".join(s["tags"]) or "no tags", size=9.5, colour=SECONDARY, indent=0.008
+        )
     if len(segments) > 4:
         c.text(f"+{len(segments) - 4} more segments", size=9, colour=MUTED)
 
@@ -1022,12 +1239,20 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
             + ", ".join(f"{s['label']} {s['seconds']:.1f} s" for s in subjects),
             size=10,
         )
-    persons = sorted(figurative["persons"], key=lambda p: (-int(p["support"]["series"]), int(p["person_id"])))
+    persons = sorted(
+        figurative["persons"],
+        key=lambda p: (-int(p["support"]["series"]), int(p["person_id"])),
+    )
     heads = {h["person_id"]: h for h in kit["enunciative"]["persons"]}
     for p in persons[:2]:
         _card(c, p, heads.get(p["person_id"]))
     rest = [f"P{p['person_id']}" for p in persons[2:]]
-    also = f"Also described: {', '.join(rest[:8])}" + (f" +{len(rest) - 8} more" if len(rest) > 8 else "") if rest else ""
+    also = (
+        f"Also described: {', '.join(rest[:8])}"
+        + (f" +{len(rest) - 8} more" if len(rest) > 8 else "")
+        if rest
+        else ""
+    )
     c.text(
         f"{also}{'; ' if also else ''}{figurative['tracked_only']['count']} tracked but never described; "
         f"{len(kit['gaps']['abstained'])} left unlinked",
@@ -1038,9 +1263,17 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
     c.heading("Text in video")
     totals = kit["summary"]["text"]
     c.text(f"{totals['readings']} readings, {totals['distinct']} distinct", size=10)
-    readings = sorted((r for s in segments for r in s["text"]), key=lambda r: (-int(r["n"]), r["text"]))[:3]
+    counts: dict[str, int] = {}
+    for s in segments:
+        for r in s["text"]:
+            counts[r["text"]] = counts.get(r["text"], 0) + int(r["n"])
+    readings = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
     if readings:
-        c.text(" · ".join(f'"{r["text"]}" x{r["n"]}' for r in readings), size=9.5, colour=SECONDARY)
+        c.text(
+            " · ".join(f'"{text}" x{n}' for text, n in readings),
+            size=9.5,
+            colour=SECONDARY,
+        )
 
 
 def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
@@ -1051,7 +1284,9 @@ def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
     for relation in relations:
         for pid in relation["pair"]:
             degree[pid] = degree.get(pid, 0) + 1
-    nodes = [pid for pid, _ in sorted(degree.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]
+    nodes = [
+        pid for pid, _ in sorted(degree.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+    ]
     height = 0.16
     if not c.room(height + 0.03):
         return
@@ -1065,29 +1300,54 @@ def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
         if a not in at or b not in at:
             continue
         attention = relation.get("attention") or {}
-        ab, ba = float(attention.get("a_to_b") or 0.0), float(attention.get("b_to_a") or 0.0)
+        ab, ba = (
+            float(attention.get("a_to_b") or 0.0),
+            float(attention.get("b_to_a") or 0.0),
+        )
         # One colour per edge, the strongest evidence: mutual, then attends, then synchrony.
         if ab >= floor and ba >= floor:
             colour, src, dst, arrow = SERIES[2], a, b, "-"
         elif ab >= floor or ba >= floor:
-            colour, src, dst, arrow = (SERIES[0], a, b, "-|>") if ab >= floor else (SERIES[0], b, a, "-|>")
+            colour, src, dst, arrow = (
+                (SERIES[0], a, b, "-|>") if ab >= floor else (SERIES[0], b, a, "-|>")
+            )
         else:
             colour, src, dst, arrow = SERIES[1], a, b, "-"
         ax.annotate(
             "",
             xy=at[dst],
             xytext=at[src],
-            arrowprops={"arrowstyle": arrow, "color": colour, "lw": 2, "shrinkA": 13, "shrinkB": 13},
+            arrowprops={
+                "arrowstyle": arrow,
+                "color": colour,
+                "lw": 2,
+                "shrinkA": 13,
+                "shrinkB": 13,
+            },
         )
     for pid, (x, y) in at.items():
-        ax.plot([x], [y], "o", markersize=22, color=SEGMENT_FILL, markeredgecolor=SERIES[0], markeredgewidth=1.2)
+        ax.plot(
+            [x],
+            [y],
+            "o",
+            markersize=22,
+            color=SEGMENT_FILL,
+            markeredgecolor=SERIES[0],
+            markeredgewidth=1.2,
+        )
         ax.text(x, y, f"P{pid}", ha="center", va="center", fontsize=8.5, color=INK)
     ax.set_xlim(-1.35, 1.35)
     ax.set_ylim(-1.35, 1.35)
     c.y -= height + 0.006
-    _legend(c, [(SERIES[0], "attends"), (SERIES[2], "mutual"), (SERIES[1], "synchrony")])
+    _legend(
+        c, [(SERIES[0], "attends"), (SERIES[2], "mutual"), (SERIES[1], "synchrony")]
+    )
     if len(degree) > len(nodes):
-        c.text(f"{len(degree) - len(nodes)} more persons in these relations not drawn", size=9, colour=MUTED)
+        c.text(
+            f"{len(degree) - len(nodes)} more persons in these relations not drawn",
+            size=9,
+            colour=MUTED,
+        )
 
 
 def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
@@ -1115,7 +1375,8 @@ def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
             str(s["visible_at_once"]),
             str(s["followed"]),
             distance["scale"] if distance else "-",
-            " ".join(v for v in (camera.get("movement"), camera.get("direction")) if v) or "-",
+            " ".join(v for v in (camera.get("movement"), camera.get("direction")) if v)
+            or "-",
             s.get("portrait_scene") or "-",
             CHECK.get(s["assessment"], s["assessment"]),
         )
@@ -1139,19 +1400,32 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     _graph(c, kit["enunciative"]["relations"], float(r["attention_floor"]))
     c.heading("Watcher-looked system")
     persons = kit["enunciative"]["persons"]
-    c.text(f"Head pose for {_count(len(persons), 'person')}, mean and sd over their samples")
+    c.text(
+        f"Head pose for {_count(len(persons), 'person')}, mean and sd over their samples"
+    )
     gazes = [p["gaze"] for p in persons if p.get("gaze")]
     samples = sum(int(g["n"]) for g in gazes)
     if samples:
         inside = sum(float(g["in_frame_share"]) * int(g["n"]) for g in gazes) / samples
-        c.text(f"Gaze for {_count(len(gazes), 'person')}: inside the frame in {inside:.0%} of {samples} samples")
+        c.text(
+            f"Gaze for {_count(len(gazes), 'person')}: inside the frame in {inside:.0%} of {samples} samples"
+        )
     else:
         c.text("Gaze: none measured", colour=MUTED)
     addressed = [p for p in persons if p.get("address")]
     looks = sum(int(p["address"]["n"]) for p in addressed)
     if looks:
-        share = sum(float(p["address"]["share"]) * int(p["address"]["n"]) for p in addressed) / looks
-        mostly = [f"P{p['person_id']}" for p in addressed if p["address"]["share"] >= 0.5 and p["address"]["n"] >= 2]
+        share = (
+            sum(
+                float(p["address"]["share"]) * int(p["address"]["n"]) for p in addressed
+            )
+            / looks
+        )
+        mostly = [
+            f"P{p['person_id']}"
+            for p in addressed
+            if p["address"]["share"] >= 0.5 and p["address"]["n"] >= 2
+        ]
         c.text(
             f"Looks into the camera in {share:.0%} of {looks} samples"
             + (f"; mostly {', '.join(mostly[:6])}" if mostly else "")
@@ -1159,7 +1433,9 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     c.heading("Framing per segment")
     moves = kit["enunciative"].get("camera") or {}
     if moves:
-        c.text("Camera: " + ", ".join(f"{k} {v:.0%}" for k, v in moves.items()), size=9.5)
+        c.text(
+            "Camera: " + ", ".join(f"{k} {v:.0%}" for k, v in moves.items()), size=9.5
+        )
     _framing_table(c, kit["enunciative"]["segments"])
 
 
@@ -1231,7 +1507,9 @@ def main() -> None:
             _identikit_page(root, out_path)
             print(f"{args.video} {name}: page -> {out_path}  (12-identikit)")
             continue
-        source = ROOT / str(_load(root, "segmentation.json", "02-segmentation")["video"])
+        source = ROOT / str(
+            _load(root, "segmentation.json", "02-segmentation")["video"]
+        )
         build, produced_by = VIEWS[name]
         out_path = previews / f"{name}_preview.mp4"
         frames = render(source, out_path, build(root))
