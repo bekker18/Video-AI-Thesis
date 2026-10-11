@@ -1,4 +1,4 @@
-"""Pipeline orchestrator. Each stage lives in src/<stage>/ and exposes run(cfg)."""
+"""Pipeline orchestrator. Each stage lives in src/pipeline/<stage>/ and exposes run(cfg)."""
 
 from __future__ import annotations
 
@@ -30,6 +30,7 @@ STAGES = [
     "11-caption",
     "12-identikit",
 ]
+DEFAULT_STAGES = STAGES[1:]
 
 
 class Stage(Protocol):
@@ -37,9 +38,9 @@ class Stage(Protocol):
 
 
 def stage_path(name: str) -> Path:
-    """01-sampling -> src/01-sampling/sampling.py, 05-global-experts -> .../global_experts.py"""
+    """01-sampling -> src/pipeline/01-sampling/sampling.py, 05-global-experts -> .../global_experts.py"""
     stem = name.split("-", 1)[1].replace("-", "_")
-    return ROOT / "src" / name / f"{stem}.py"
+    return ROOT / "src" / "pipeline" / name / f"{stem}.py"
 
 
 def load_stage(name: str) -> Stage:
@@ -64,8 +65,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--stages",
         nargs="+",
-        default=STAGES,
-        help="subset of stages to run, e.g. --stages 02-segmentation",
+        default=DEFAULT_STAGES,
+        help="subset of stages to run, e.g. --stages 02-segmentation; 01-sampling only when named",
     )
     p.add_argument(
         "--fps",
@@ -347,7 +348,7 @@ def main() -> None:
             identikit_labels=args.identikit_labels,
             subject_min=args.subject_min,
         )
-        started = time.perf_counter()  # includes the weights check, part of a stage's real cost
+        started = time.perf_counter()
         download_models.ensure(name)
         print(f"[{name}] start")
         result = load_stage(name).run(cfg)

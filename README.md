@@ -47,7 +47,7 @@ tracks/          best crops per track  (06)
 
 | flag                            | default          | meaning                                                       |
 | ------------------------------- | ---------------- | ------------------------------------------------------------- |
-| `--stages <name> ...`         | all              | run a subset, always in pipeline order                        |
+| `--stages <name> ...`         | all but 01       | run a subset, always in pipeline order; 01 only when named    |
 | `--device cpu\|cuda\|auto`      | `auto`         | where models run                                              |
 | `--fps 5`                     | every frame      | sample rate for 01-sampling                                   |
 | `--width 640`                 | source           | resize frames, keeping aspect ratio                           |
@@ -136,4 +136,14 @@ To prefetch everything up front:
 
 ```bash
 docker compose run --rm --entrypoint python3 pipeline download_models.py
+```
+
+## AVE dataset
+
+Labels and a seeded random sample of scenes from [AVE](https://github.com/dawitmureja/AVE),
+into `data/raw/ave/`. Videos come from YouTube; deleted or region-blocked ones are skipped
+and listed in `unavailable.txt`.
+
+```bash
+docker compose run --rm --entrypoint python3 pipeline download_ave.py --count 200
 ```
