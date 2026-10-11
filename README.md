@@ -82,6 +82,7 @@ tracks/          best crops per track  (06)
 | `--series-stride 2`           | `2`            | observed rows between series samples in 07                    |
 | `--blendshapes 10`            | `10`           | blendshape coefficients kept per sample                       |
 | `--attributes 8`              | `8`            | zero-shot face attributes kept per crop                       |
+| `--pose-threads 8`            | `8`            | pose landmarkers 07 runs in parallel                          |
 | `--identity-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                     |
 | `--identity-face-across 0.45` | `0.45`         | face cosine a link needs across segments                      |
 | `--identity-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                     |
