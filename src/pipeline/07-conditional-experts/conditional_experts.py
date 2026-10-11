@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import queue
 from collections.abc import Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -42,6 +44,7 @@ EMOTIONS = (
 OCR_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
 REID_INPUT = (128, 256)  # width, height
 REID_BATCH = 16
+ONNX_BATCH = 32  # emotion, ArcFace and genderage inputs per call
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
 
@@ -147,34 +150,36 @@ def _series_rows(track: dict[str, Any], stride: int) -> list[dict[str, Any]]:
     return observed[:: max(1, stride)]
 
 
-def _landmarkers(model_dir: Path, want_face: bool, want_pose: bool) -> tuple[Any, Any]:
+def _face_landmarker(model_dir: Path) -> Any:
     from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python import vision as mp_vision
 
-    face = pose = None
-    if want_face:
-        face = mp_vision.FaceLandmarker.create_from_options(
-            mp_vision.FaceLandmarkerOptions(
-                base_options=mp_python.BaseOptions(
-                    model_asset_path=str(model_dir / FACE_MODEL)
-                ),
-                running_mode=mp_vision.RunningMode.IMAGE,
-                num_faces=1,
-                output_face_blendshapes=True,
-                output_facial_transformation_matrixes=True,
-            )
+    return mp_vision.FaceLandmarker.create_from_options(
+        mp_vision.FaceLandmarkerOptions(
+            base_options=mp_python.BaseOptions(
+                model_asset_path=str(model_dir / FACE_MODEL)
+            ),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_faces=1,
+            output_face_blendshapes=True,
+            output_facial_transformation_matrixes=True,
         )
-    if want_pose:
-        pose = mp_vision.PoseLandmarker.create_from_options(
-            mp_vision.PoseLandmarkerOptions(
-                base_options=mp_python.BaseOptions(
-                    model_asset_path=str(model_dir / POSE_MODEL)
-                ),
-                running_mode=mp_vision.RunningMode.IMAGE,
-                num_poses=1,
-            )
+    )
+
+
+def _pose_landmarker(model_dir: Path) -> Any:
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
+
+    return mp_vision.PoseLandmarker.create_from_options(
+        mp_vision.PoseLandmarkerOptions(
+            base_options=mp_python.BaseOptions(
+                model_asset_path=str(model_dir / POSE_MODEL)
+            ),
+            running_mode=mp_vision.RunningMode.IMAGE,
+            num_poses=1,
         )
-    return face, pose
+    )
 
 
 def _mp_image(bgr: Array) -> Any:
@@ -254,51 +259,76 @@ def _pose_pass(landmarker: Any, crop: Array) -> dict[str, Any] | None:
     return {"keypoints": points, "world": world}
 
 
+def _pose_from(pool: queue.Queue[Any], crop: Array) -> dict[str, Any] | None:
+    """Borrows a landmarker from the pool; MediaPipe releases the GIL, so the pool runs in parallel."""
+    landmarker = pool.get()
+    try:
+        return _pose_pass(landmarker, crop)
+    finally:
+        pool.put(landmarker)
+
+
 def _session(path: Path) -> Any:
     import onnxruntime
 
     # CPU only: onnxruntime's CUDA build would have to agree with torch's on cuDNN.
-    return onnxruntime.InferenceSession(str(path), providers=["CPUExecutionProvider"])
-
-
-def _emotion_pass(session: Any, crop: Array) -> dict[str, Any] | None:
-    if not crop.size:
-        return None
-    rgb = (
-        cv2.cvtColor(
-            cv2.resize(crop, (224, 224), interpolation=cv2.INTER_LINEAR),
-            cv2.COLOR_BGR2RGB,
-        ).astype(np.float32)
-        / 255.0
+    # Idle threads must not spin waiting for work: they hold the cores MediaPipe needs.
+    options = onnxruntime.SessionOptions()
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return onnxruntime.InferenceSession(
+        str(path), sess_options=options, providers=["CPUExecutionProvider"]
     )
-    rgb = (rgb - IMAGENET_MEAN) / IMAGENET_STD
-    tensor = rgb.transpose(2, 0, 1)[None]
-    raw = np.asarray(session.run(None, {session.get_inputs()[0].name: tensor})[0])[0]
 
-    logits = raw[: len(EMOTIONS)]
-    exp = np.exp(logits - logits.max())
-    probs = exp / exp.sum()
-    out: dict[str, Any] = {
-        "label": EMOTIONS[int(np.argmax(probs))],
-        "scores": {name: round(float(p), 4) for name, p in zip(EMOTIONS, probs)},
-    }
-    if raw.shape[0] >= len(EMOTIONS) + 2:
-        out["valence"] = round(float(raw[len(EMOTIONS)]), 4)
-        out["arousal"] = round(float(raw[len(EMOTIONS) + 1]), 4)
+
+def _run_batched(session: Any, tensors: list[Array]) -> list[Array]:
+    """One call per ONNX_BATCH inputs, not one per input; rows come back in input order."""
+    name = session.get_inputs()[0].name
+    rows: list[Array] = []
+    for start in range(0, len(tensors), ONNX_BATCH):
+        batch = np.stack(tensors[start : start + ONNX_BATCH])
+        rows += list(np.asarray(session.run(None, {name: batch})[0]))
+    return rows
+
+
+def _emotions(session: Any, crops: list[Array]) -> list[dict[str, Any]]:
+    tensors: list[Array] = []
+    for crop in crops:
+        rgb = (
+            cv2.cvtColor(
+                cv2.resize(crop, (224, 224), interpolation=cv2.INTER_LINEAR),
+                cv2.COLOR_BGR2RGB,
+            ).astype(np.float32)
+            / 255.0
+        )
+        tensors.append(((rgb - IMAGENET_MEAN) / IMAGENET_STD).transpose(2, 0, 1))
+
+    out: list[dict[str, Any]] = []
+    for raw in _run_batched(session, tensors):
+        logits = raw[: len(EMOTIONS)]
+        exp = np.exp(logits - logits.max())
+        probs = exp / exp.sum()
+        feeling: dict[str, Any] = {
+            "label": EMOTIONS[int(np.argmax(probs))],
+            "scores": {name: round(float(p), 4) for name, p in zip(EMOTIONS, probs)},
+        }
+        if raw.shape[0] >= len(EMOTIONS) + 2:
+            feeling["valence"] = round(float(raw[len(EMOTIONS)]), 4)
+            feeling["arousal"] = round(float(raw[len(EMOTIONS) + 1]), 4)
+        out.append(feeling)
     return out
 
 
-def _embed_face(session: Any, aligned: Array) -> Array:
-    tensor = (
-        cv2.cvtColor(aligned, cv2.COLOR_BGR2RGB).astype(np.float32) - 127.5
-    ) / 127.5
-    out = np.asarray(
-        session.run(
-            None, {session.get_inputs()[0].name: tensor.transpose(2, 0, 1)[None]}
-        )[0]
-    )[0]
-    norm = float(np.linalg.norm(out))
-    return out / norm if norm else out
+def _embed_faces(session: Any, faces: list[Array]) -> list[Array]:
+    tensors = [
+        ((cv2.cvtColor(face, cv2.COLOR_BGR2RGB).astype(np.float32) - 127.5) / 127.5)
+        .transpose(2, 0, 1)
+        for face in faces
+    ]
+    out: list[Array] = []
+    for raw in _run_batched(session, tensors):
+        norm = float(np.linalg.norm(raw))
+        out.append(raw / norm if norm else raw)
+    return out
 
 
 def _embed_bodies(session: Any, crops: list[Array]) -> Array:
@@ -329,22 +359,29 @@ def _embed_bodies(session: Any, crops: list[Array]) -> Array:
     return result
 
 
-def _gender_age(session: Any, aligned: Array) -> dict[str, Any]:
-    resized = cv2.resize(aligned, (96, 96), interpolation=cv2.INTER_LINEAR)
-    tensor = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB).astype(np.float32)
-    raw = np.asarray(
-        session.run(
-            None, {session.get_inputs()[0].name: tensor.transpose(2, 0, 1)[None]}
-        )[0]
-    )[0]
-    # The two gender outputs are unnormalised, so a raw max is not a confidence.
-    exp = np.exp(raw[:2] - raw[:2].max())
-    probs = exp / exp.sum()
-    return {
-        "gender": "male" if int(np.argmax(raw[:2])) == 1 else "female",
-        "gender_score": round(float(probs.max()), 4),
-        "age": round(float(raw[2]) * 100),
-    }
+def _gender_ages(session: Any, faces: list[Array]) -> list[dict[str, Any]]:
+    tensors = [
+        cv2.cvtColor(
+            cv2.resize(face, (96, 96), interpolation=cv2.INTER_LINEAR),
+            cv2.COLOR_BGR2RGB,
+        )
+        .astype(np.float32)
+        .transpose(2, 0, 1)
+        for face in faces
+    ]
+    out: list[dict[str, Any]] = []
+    for raw in _run_batched(session, tensors):
+        # The two gender outputs are unnormalised, so a raw max is not a confidence.
+        exp = np.exp(raw[:2] - raw[:2].max())
+        probs = exp / exp.sum()
+        out.append(
+            {
+                "gender": "male" if int(np.argmax(raw[:2])) == 1 else "female",
+                "gender_score": round(float(probs.max()), 4),
+                "age": round(float(raw[2]) * 100),
+            }
+        )
+    return out
 
 
 def _recogniser(model_dir: Path) -> Any:
@@ -550,6 +587,8 @@ def run(cfg: Config) -> dict[str, Any]:
 
     download_models.ensure(STAGE)
     model_dir = cfg.model_dir
+    # ultralytics, imported by 03 and 06 in the same process, leaves OpenCV on one thread.
+    cv2.setNumThreads(-1)
 
     gates = {int(s["index"]): set(s["experts"]) for s in routing["shots"]}
     want_face = any("face" in e for e in gates.values())
@@ -568,49 +607,74 @@ def run(cfg: Config) -> dict[str, Any]:
                     (index, int(track["track_id"]), row)
                 )
 
-    face_landmarker, pose_landmarker = _landmarkers(model_dir, want_face, want_pose)
+    workers = max(1, cfg.pose_threads)
+    face_landmarker = _face_landmarker(model_dir) if want_face else None
+    poses: queue.Queue[Any] | None = None
+    if want_pose:
+        poses = queue.Queue()
+        for _ in range(workers):
+            poses.put(_pose_landmarker(model_dir))
     emotion = _session(model_dir / EMOTION_MODEL) if want_face else None
     gaze = _gaze_model(device) if want_face and schedule else None
 
-    series: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    # Pose runs in the pool and emotion in batches after the loop; their keys are reserved
+    # as each sample is made, so every sample keeps the field order it always had.
+    observed: list[tuple[tuple[int, int], dict[str, Any]]] = []
+    feelings: list[tuple[dict[str, Any], Array]] = []
+    bodies: list[tuple[dict[str, Any], Future[dict[str, Any] | None]]] = []
     if schedule:
-        for index, image in _frames(cfg.video, set(schedule)):
-            looking: list[tuple[dict[str, Any], list[int]]] = []
-            for shot, track_id, row in schedule[index]:
-                experts = gates.get(shot, set())
-                sample: dict[str, Any] = {"frame": index}
+        with ThreadPoolExecutor(workers) as executor:
+            for index, image in _frames(cfg.video, set(schedule)):
+                looking: list[tuple[dict[str, Any], list[int]]] = []
+                for shot, track_id, row in schedule[index]:
+                    experts = gates.get(shot, set())
+                    sample: dict[str, Any] = {"frame": index}
 
-                if "face" in experts and row["face"] and face_landmarker is not None:
-                    crop = _crop(image, row["face"], cfg.crop_pad)
-                    found = (
-                        _face_pass(face_landmarker, crop, cfg.blendshapes)
-                        if crop.size
-                        else None
-                    )
-                    if found:
-                        sample.update(found)
-                        # HSEmotion has no "not a face" answer, so only where the mesh found one
-                        if emotion is not None:
-                            feeling = _emotion_pass(emotion, crop)
-                            if feeling:
-                                sample["emotion"] = feeling
-                        looking.append((sample, row["face"]))
-
-                if "body" in experts and pose_landmarker is not None:
-                    crop = _crop(image, row["body"])
-                    if crop.size:
-                        found = _pose_pass(pose_landmarker, crop)
+                    if "face" in experts and row["face"] and face_landmarker is not None:
+                        crop = _crop(image, row["face"], cfg.crop_pad)
+                        found = (
+                            _face_pass(face_landmarker, crop, cfg.blendshapes)
+                            if crop.size
+                            else None
+                        )
                         if found:
-                            sample["pose"] = found
+                            sample.update(found)
+                            # HSEmotion has no "not a face" answer, so only where the mesh found one
+                            if emotion is not None:
+                                sample["emotion"] = None
+                                feelings.append((sample, crop.copy()))
+                            looking.append((sample, row["face"]))
 
-                if len(sample) > 1:
-                    series.setdefault((shot, track_id), []).append(sample)
+                    if "body" in experts and poses is not None:
+                        crop = _crop(image, row["body"])
+                        if crop.size:
+                            sample["pose"] = None
+                            bodies.append(
+                                (sample, executor.submit(_pose_from, poses, crop.copy()))
+                            )
 
-            # Gaze needs every head in the frame at once, so it runs after the frame's rows.
-            if gaze is not None and looking:
-                found_gaze = _gaze_pass(gaze, image, [face for _, face in looking], device)
-                for (sample, _), result in zip(looking, found_gaze):
-                    sample["gaze"] = result
+                    observed.append(((shot, track_id), sample))
+
+                # Gaze needs every head in the frame at once, so it runs after the frame's rows.
+                if gaze is not None and looking:
+                    found_gaze = _gaze_pass(gaze, image, [face for _, face in looking], device)
+                    for (sample, _), result in zip(looking, found_gaze):
+                        sample["gaze"] = result
+
+    for sample, future in bodies:
+        found = future.result()
+        if found:
+            sample["pose"] = found
+        else:
+            del sample["pose"]
+    if emotion is not None and feelings:
+        for (sample, _), feeling in zip(feelings, _emotions(emotion, [c for _, c in feelings])):
+            sample["emotion"] = feeling
+
+    series: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for key, sample in observed:
+        if len(sample) > 1:
+            series.setdefault(key, []).append(sample)
 
     # Attributes read 06's ranked crops straight off disk - no decoding at all.
     attribute_jobs: list[tuple[int, int, int, Path]] = []
@@ -640,6 +704,8 @@ def run(cfg: Config) -> dict[str, Any]:
         clip_keys: list[tuple[int, int]] = []
         fair_crops: list[Array] = []
         fair_keys: list[tuple[int, int, int]] = []
+        faces: list[Array] = []
+        ages: list[dict[str, Any]] = []
         for shot, track_id, frame, path in attribute_jobs:
             image = cv2.imread(str(path))
             if image is None:
@@ -661,15 +727,20 @@ def run(cfg: Config) -> dict[str, Any]:
 
             entry = per_track.setdefault((shot, track_id), _new_entry())
             # keyed by crop frame: not every crop yields a row, and 08 gates by crop
-            entry["embedding_rows"].append({"row": len(embeddings), "frame": frame})
-            embeddings.append(_embed_face(arcface, aligned))
-            entry["gender_age"].append({"frame": frame, **_gender_age(genderage, aligned)})
+            entry["embedding_rows"].append({"row": len(faces), "frame": frame})
+            faces.append(aligned)
+            ages.append({"frame": frame})  # filled by the batched genderage pass below
+            entry["gender_age"].append(ages[-1])
             clip_crops.append(image)  # CLIP reads the unaligned crop
             clip_keys.append((shot, track_id))
             fair_crops.append(
                 cv2.warpAffine(image, matrix * 2, (224, 224), borderValue=(0.0, 0.0, 0.0))
             )
             fair_keys.append((shot, track_id, frame))
+
+        embeddings = _embed_faces(arcface, faces)
+        for age, result in zip(ages, _gender_ages(genderage, faces)):
+            age.update(result)
 
         if clip_crops:
             found = _clip_attributes(
@@ -779,9 +850,10 @@ def run(cfg: Config) -> dict[str, Any]:
                 )
         shots.append(record)
 
-    for landmarker in (face_landmarker, pose_landmarker):
-        if landmarker is not None:
-            landmarker.close()
+    if face_landmarker is not None:
+        face_landmarker.close()
+    while poses is not None and not poses.empty():
+        poses.get().close()
 
     if embeddings:
         np.save(cfg.embeddings_dir / "face_embeddings.npy", np.stack(embeddings))

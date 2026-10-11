@@ -170,6 +170,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--attributes", type=int, default=8, help="zero-shot attributes kept per crop"
     )
+    p.add_argument(
+        "--pose-threads",
+        type=int,
+        default=8,
+        help="pose landmarkers 07 runs in parallel",
+    )
 
     p.add_argument(
         "--identity-face-within",
@@ -330,6 +336,7 @@ def main() -> None:
             series_stride=args.series_stride,
             blendshapes=args.blendshapes,
             attributes=args.attributes,
+            pose_threads=args.pose_threads,
             identity_face_within=args.identity_face_within,
             identity_face_across=args.identity_face_across,
             identity_body_within=args.identity_body_within,

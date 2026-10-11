@@ -72,6 +72,7 @@ class Config:
     series_stride: int  # observed rows between series samples
     blendshapes: int  # blendshape coefficients kept per sample
     attributes: int  # zero-shot attributes kept per crop
+    pose_threads: int  # pose landmarkers run in parallel
 
     # 08-identity
     identity_face_within: float  # face cosine a link needs inside a segment
