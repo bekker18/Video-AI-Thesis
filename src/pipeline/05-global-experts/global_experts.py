@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -87,12 +89,6 @@ def _fit(image: Array, longest: int) -> Array:
         (round(width * scale), round(height * scale)),
         interpolation=cv2.INTER_AREA,
     )
-
-
-def _write(path: Path, image: Array) -> str:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), image)
-    return f"global/{path.parent.name}/{path.name}"
 
 
 def _palette(rgb: Array) -> list[dict[str, Any]]:
@@ -316,18 +312,17 @@ def _scene(
     return out, outdoor
 
 
-def _tags(
-    embeddings: Array, device: str, model_dir: Path, clip_cache: Path, top: int
-) -> tuple[list[list[dict[str, Any]]], list[dict[str, float]]]:
-    """Zero-shot tags from RAM's vocabulary and the medium, over 02's keyframe embeddings."""
+def _text_cache(model_dir: Path, device: str, prompts: list[str]) -> Path:
+    """Text embeddings depend only on the model, the device and the prompts, so they are kept."""
+    key = hashlib.sha256("\n".join([CLIP_MODEL, device, *prompts]).encode()).hexdigest()
+    return model_dir / f"text_{key[:16]}.npy"
+
+
+def _encode_text(
+    prompt_lists: tuple[list[str], ...], device: str, clip_cache: Path
+) -> list[Array]:
     import open_clip
     import torch
-
-    vocabulary = [
-        line.strip()
-        for line in (model_dir / TAG_LIST).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
 
     model, _, _ = open_clip.create_model_and_transforms(
         CLIP_MODEL, cache_dir=str(clip_cache)
@@ -335,19 +330,43 @@ def _tags(
     tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
     model = model.to(device).eval()
 
-    def encode(prompts: list[str]) -> Array:
-        chunks: list[Array] = []
-        with torch.no_grad():
+    out: list[Array] = []
+    with torch.no_grad():
+        for prompts in prompt_lists:
+            chunks: list[Array] = []
             for i in range(0, len(prompts), 256):
                 tokens = tokenizer(prompts[i : i + 256]).to(device)
                 features = model.encode_text(tokens).float()
                 features /= features.norm(dim=-1, keepdim=True)
                 chunks.append(features.cpu().numpy())
-        return np.concatenate(chunks)
-
-    tag_text = encode([f"a photo of {t}" for t in vocabulary])
-    medium_text = encode([p for pair in MEDIUM.values() for p in pair])
+            out.append(np.concatenate(chunks))
     _free(model)
+    return out
+
+
+def _tags(
+    embeddings: Array, device: str, model_dir: Path, clip_cache: Path, top: int
+) -> tuple[list[list[dict[str, Any]]], list[dict[str, float]]]:
+    """Zero-shot tags from RAM's vocabulary and the medium, over 02's keyframe embeddings."""
+    vocabulary = [
+        line.strip()
+        for line in (model_dir / TAG_LIST).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    prompts = (
+        [f"a photo of {t}" for t in vocabulary],
+        [p for pair in MEDIUM.values() for p in pair],
+    )
+    cached = [_text_cache(model_dir, device, p) for p in prompts]
+    if all(path.exists() for path in cached):
+        tag_text, medium_text = (np.load(path) for path in cached)
+    else:
+        tag_text, medium_text = _encode_text(prompts, device, clip_cache)
+        for path, text in zip(cached, (tag_text, medium_text)):
+            partial = path.with_name(path.name + ".part")
+            with partial.open("wb") as handle:
+                np.save(handle, text)
+            partial.replace(path)
 
     scores = embeddings @ tag_text.T
     out: list[list[dict[str, Any]]] = []
@@ -508,6 +527,16 @@ def run(cfg: Config) -> dict[str, Any]:
     ]
 
     root = cfg.out_root / "global"
+    # PNG encoding runs beside the models; every write is checked before global.json.
+    writer = ThreadPoolExecutor(4)
+    writes: list[Future[bool]] = []
+
+    def write(kind: str, key: str, image: Array) -> str:
+        path = root / kind / f"{key}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writes.append(writer.submit(cv2.imwrite, str(path), image))
+        return f"global/{kind}/{path.name}"
+
     depth_maps = _depth(images, device, cfg.model_dir, batch)
     disparity: list[Array] = []  # kept for the panoptic pass
     for record, depth in zip(records, depth_maps):
@@ -517,22 +546,20 @@ def run(cfg: Config) -> dict[str, Any]:
         disparity.append(unit.astype(np.float32))
         scaled = unit * 65535.0
         record["depth"] = {
-            "path": _write(
-                root / "depth" / f"{record['key']}.png", scaled.astype(np.uint16)
-            ),
+            "path": write("depth", record["key"], scaled.astype(np.uint16)),
             "min": round(low, 4),
             "max": round(high, 4),
             "relative": True,
         }
         record["normals"] = {
-            "path": _write(root / "normals" / f"{record['key']}.png", _normals(depth)),
+            "path": write("normals", record["key"], _normals(depth)),
             "source": "depth gradient",
         }
     del depth_maps
 
     for record, edge in zip(records, _edges(images, device, cfg.model_dir)):
         record["edges"] = {
-            "path": _write(root / "edges" / f"{record['key']}.png", edge),
+            "path": write("edges", record["key"], edge),
             "density": round(float((edge > 128).mean()), 4),
         }
 
@@ -552,7 +579,7 @@ def run(cfg: Config) -> dict[str, Any]:
     )
     for record, label_map in zip(records, semantic_maps):
         record["semantic"] = {
-            "path": _write(root / "semantic" / f"{record['key']}.png", label_map),
+            "path": write("semantic", record["key"], label_map),
             "label_space": "ade20k",
             "coverage": _coverage(label_map, semantic_names, cfg.seg_top),
         }
@@ -565,13 +592,16 @@ def run(cfg: Config) -> dict[str, Any]:
         records, panoptic_maps, listings, backgrounds
     ):
         record["panoptic"] = {
-            "path": _write(root / "panoptic" / f"{record['key']}.png", label_map),
+            "path": write("panoptic", record["key"], label_map),
             "label_space": "coco_panoptic",
             "segment_count": len(segments),
             "segments": segments[: cfg.seg_top],
             "background_disparity": background,
         }
     del panoptic_maps, disparity
+    writer.shutdown()
+    if not all(w.result() for w in writes):
+        raise RuntimeError(f"a dense map under {root} failed to write")
 
     meta = {
         "video": str(cfg.video),

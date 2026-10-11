@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
+RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --compile-bytecode
 
 ENV PATH=/app/.venv/bin:$PATH \
     YOLO_CONFIG_DIR=/app/models/ultralytics \
