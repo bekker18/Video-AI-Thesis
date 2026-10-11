@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import shutil
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -26,8 +27,12 @@ SHARP_POOL = (
 )
 CORNERS = 200  # tracked per frame pair for camera motion
 MIN_POINTS = 10  # tracked corners a motion estimate needs
-STILL = 0.05  # net pan, tilt or log zoom over a shot below which the camera did not move
-SHAKE = 0.004  # per-frame translation spread, as a share of width, that reads as handheld
+STILL = (
+    0.05  # net pan, tilt or log zoom over a shot below which the camera did not move
+)
+SHAKE = (
+    0.004  # per-frame translation spread, as a share of width, that reads as handheld
+)
 
 
 def _device(name: str) -> str:
@@ -90,7 +95,9 @@ def _motion(before: Array, after: Array) -> tuple[float, float, float] | None:
     good = status.ravel() == 1
     if int(good.sum()) < MIN_POINTS:
         return None
-    matrix, _ = cv2.estimateAffinePartial2D(points[good], moved[good], method=cv2.RANSAC)
+    matrix, _ = cv2.estimateAffinePartial2D(
+        points[good], moved[good], method=cv2.RANSAC
+    )
     if matrix is None:
         return None
     width = before.shape[1]
@@ -161,7 +168,9 @@ def _scan(
     shot_frames: list[Array] = []
     vectors: list[Array] = []
     sharp: list[float] = []
-    motions: list[tuple[float, float, float] | None] = []  # frame i to i + 1
+    # frame i to i + 1, on a thread beside the decode loop: OpenCV releases the GIL
+    motions: list[Future[tuple[float, float, float] | None]] = []
+    background = ThreadPoolExecutor(1)
     previous: Array | None = None
     batch: list[Array] = []
 
@@ -207,13 +216,14 @@ def _scan(
         gray = cv2.cvtColor(mid, cv2.COLOR_BGR2GRAY)
         sharp.append(_sharpness(gray))
         if previous is not None:
-            motions.append(_motion(previous, gray))
+            motions.append(background.submit(_motion, previous, gray))
         previous = gray
 
         if len(batch) == BATCH:
             flush()
     flush()
     capture.release()
+    background.shutdown()
 
     if not shot_frames:
         raise RuntimeError(f"decoded no frames from {video}")
@@ -222,7 +232,7 @@ def _scan(
         np.asarray(shot_frames, dtype=np.uint8),
         np.concatenate(vectors),
         np.asarray(sharp),
-        motions,
+        [m.result() for m in motions],
         fps,
     )
 

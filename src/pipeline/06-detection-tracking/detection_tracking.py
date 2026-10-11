@@ -1,20 +1,13 @@
-"""06-detection-tracking: the first gated stage.
-
-Runs only on shots where 04-router fired detection_tracking, and establishes the identities
-every later conditional expert depends on. Bodies are detected and tracked; faces are found
-with YuNet inside each tracked body box, so a face inherits its body's track id instead of
-needing a second tracker.
-
-Track ids are scoped to one shot - the tracker is rebuilt at every boundary, because Kalman
-and IoU association carry no meaning across a cut. The key is (shot, track_id).
-"""
+"""06-detection-tracking: bodies tracked per shot on routed shots; faces found inside each tracked body."""
 
 from __future__ import annotations
 
 import json
+import multiprocessing
 import shutil
 import time
 from collections.abc import Iterator
+from concurrent.futures import Future, ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -30,8 +23,23 @@ PROFILER = "03-profiler"  # detector and YuNet weights are reused from there
 FACE_MODEL = "face_yunet.onnx"
 PERSON_CLASS = 0
 FACE_INPUT = (320, 320)
+FACE_WORKERS = 4  # YuNet processes
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
+FaceCrop: TypeAlias = tuple[Array, float, tuple[int, int, int, int]]  # canvas, scale, body box
+
+_yunet_detector: Any = None  # one per YuNet worker
+
+
+def _start_yunet(model: str, conf: float) -> None:
+    global _yunet_detector
+    cv2.setNumThreads(0)
+    _yunet_detector = cv2.FaceDetectorYN.create(model, "", FACE_INPUT, conf, 0.3, 5000)
+
+
+def _yunet(canvas: Array) -> Array | None:
+    _, detections = _yunet_detector.detect(canvas)
+    return detections
 
 
 def _device(name: str) -> str:
@@ -58,9 +66,7 @@ class Detections:
 
 @dataclass(frozen=True)
 class TrackerArgs:
-    """ByteTrack splits detections at track_high_thresh and runs a second association pass
-    over everything down to track_low_thresh. That pass is what recovers blurred or occluded
-    people, so track_low_thresh must sit well below 03-profiler's detection threshold."""
+    """ByteTrack's settings; track_low_thresh must sit well below 03's detection threshold."""
 
     track_high_thresh: float
     track_low_thresh: float
@@ -83,9 +89,7 @@ def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
 
 
 def _wanted(shots: list[dict[str, Any]], stride: int) -> dict[int, int]:
-    """Frame index -> shot index, for the frames that get a real detection pass. Skipped
-    frames are filled in by interpolation, so no pixels are needed for them. A shot's last
-    frame is always included, to anchor the interpolation at both ends."""
+    """Frame index -> shot index for the detection frames; a shot's last frame is always one."""
     picked: dict[int, int] = {}
     for shot in shots:
         start, end = int(shot["start_frame"]), int(shot["end_frame"])
@@ -97,8 +101,7 @@ def _wanted(shots: list[dict[str, Any]], stride: int) -> dict[int, int]:
 
 
 def _from_video(video: Path, wanted: dict[int, int]) -> Iterator[tuple[int, Array]]:
-    """Sequential decode. grab() skips unwanted frames without paying for colour conversion,
-    but every frame before the last wanted one still has to be walked past."""
+    """Sequential decode; grab() walks past unwanted frames without colour conversion."""
     capture = cv2.VideoCapture(str(video))
     if not capture.isOpened():
         raise RuntimeError(f"cannot open {video}")
@@ -168,9 +171,7 @@ def _make_tracker(name: str, cfg: Config, fps: float) -> Any:
 def _split(
     boxes: Any, names: dict[int, str], object_conf: float
 ) -> tuple[Detections, list[dict[str, Any]]]:
-    """One forward pass gives persons and objects. Persons go to the tracker at the low
-    threshold ByteTrack needs; objects only need a temporal union, so they keep 03's
-    threshold rather than drowning the union in low-confidence junk."""
+    """Persons for the tracker at its low threshold, objects at 03's for the temporal union."""
     xywh = boxes.xywh.cpu().numpy()
     xyxy = boxes.xyxy.cpu().numpy()
     conf = boxes.conf.cpu().numpy()
@@ -192,8 +193,7 @@ def _split(
 
 
 def _frontality(landmarks: Array) -> float:
-    """YuNet returns right eye, left eye, nose and both mouth corners. A frontal face puts
-    the nose on the midpoint between the eyes; profile views push it towards one of them."""
+    """A frontal face puts YuNet's nose landmark on the midpoint between the eyes."""
     right_eye, left_eye, nose = landmarks[0], landmarks[1], landmarks[2]
     span = float(np.linalg.norm(left_eye - right_eye))
     if span < 1e-6:
@@ -203,9 +203,7 @@ def _frontality(landmarks: Array) -> float:
 
 
 def _letterbox(crop: Array, size: int) -> tuple[Array, float]:
-    """Body boxes are all different shapes, but YuNet must always see the same input size.
-    Calling setInputSize per crop reallocates its buffers and it then returns phantom faces
-    scoring ~1.0, differing between runs on identical pixels. Fixed size, padded, is stable."""
+    """A fixed 320x320 input: per-crop setInputSize makes YuNet return phantom faces."""
     height, width = crop.shape[:2]
     scale = min(size / width, size / height)
     new_width, new_height = max(1, round(width * scale)), max(1, round(height * scale))
@@ -216,18 +214,21 @@ def _letterbox(crop: Array, size: int) -> tuple[Array, float]:
     return canvas, scale
 
 
-def _face_in(
-    detector: Any, image: Array, box: list[int], conf: float
-) -> dict[str, Any] | None:
-    """YuNet inside the tracked body box only, so a face always belongs to a body track."""
+def _face_crop(image: Array, box: list[int]) -> FaceCrop | None:
+    """The tracked body box letterboxed for YuNet, so a face always belongs to a body track."""
     height, width = image.shape[:2]
     x1, y1 = max(0, box[0]), max(0, box[1])
     x2, y2 = min(width, box[2]), min(height, box[3])
     if x2 - x1 < 24 or y2 - y1 < 24:
         return None
-
     canvas, scale = _letterbox(image[y1:y2, x1:x2], FACE_INPUT[0])
-    _, detections = detector.detect(canvas)
+    return canvas, scale, (x1, y1, x2, y2)
+
+
+def _face_from(
+    detections: Array | None, crop: FaceCrop, conf: float
+) -> dict[str, Any] | None:
+    _, scale, (x1, y1, x2, y2) = crop
     if detections is None or not len(detections):
         return None
 
@@ -245,8 +246,7 @@ def _face_in(
     if fw <= 0 or fh <= 0:
         return None
     landmarks = raw[4:14].reshape(5, 2) / scale
-    # YuNet regresses coordinates that can run past the crop, so clamp to the body box:
-    # a face belongs to its track's body by construction and must not escape it.
+    # YuNet's box can run past the crop; clamped, a face never escapes its body box.
     return {
         "box": [
             min(max(x1 + fx, x1), x2),
@@ -262,11 +262,7 @@ def _face_in(
 def _interpolate(
     observed: dict[int, dict[str, Any]], max_gap: int
 ) -> tuple[list[dict[str, Any]], int, int]:
-    """Detection runs on a stride; frames in between are filled from the observations either
-    side. This is offline, so interpolation beats forward prediction.
-
-    Only the stride is filled. A longer gap means the tracker lost the object and re-acquired
-    it, and a straight line across that is fabrication - those frames get no row at all."""
+    """Fills only the detection stride; a wider gap is a lost track and gets no rows."""
     frames = sorted(observed)
     out: list[dict[str, Any]] = []
     gaps = 0
@@ -301,8 +297,7 @@ def _interpolate(
 
 
 def _pick_crops(candidates: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
-    """Split the track into equal spans and take the best of each. Ranking a whole track at
-    once returns near-identical neighbouring frames - the trap 02 hit with keyframes."""
+    """The best crop of each equal span of the track, so picks are not neighbouring frames."""
     if not candidates or count <= 0:
         return []
     ordered = sorted(candidates, key=lambda c: int(c["frame"]))
@@ -317,8 +312,7 @@ def _pick_crops(candidates: list[dict[str, Any]], count: int) -> list[dict[str, 
 
 
 def _score_pool(pool: list[dict[str, Any]]) -> None:
-    """Sharpness and area are relative to the best in the same track, so a distant track is
-    not punished for being small. Frontality only exists for face crops."""
+    """Sharpness and area relative to the track's best; frontality exists only for faces."""
     sharpest = max(float(c["sharpness"]) for c in pool) or 1.0
     largest = max(float(c["area"]) for c in pool) or 1.0
     for candidate in pool:
@@ -335,8 +329,7 @@ def _score_pool(pool: list[dict[str, Any]]) -> None:
 
 
 def _objects(seen: list[tuple[int, dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Temporal union rather than identity: downstream consumes object classes and how
-    long they last, so per-class extent is enough without stable object ids."""
+    """Per-class temporal union, not identity: downstream reads classes and their extent."""
     union: dict[str, dict[str, Any]] = {}
     per_frame: dict[tuple[str, int], int] = {}
     for frame, box in seen:
@@ -384,6 +377,10 @@ def _write_crops(
         return
 
     root = cfg.out_root / "tracks"
+    made: set[Path] = set()
+    # JPEG encoding runs beside the decode; every write is checked before returning.
+    writer = ThreadPoolExecutor(4)
+    writes: list[Future[bool]] = []
     for index, image in _source(cfg, {f: wanted[f] for f in needed}, frame_count):
         for shot, track_id, candidate in needed[index]:
             x1, y1, x2, y2 = candidate["box"]
@@ -394,10 +391,22 @@ def _write_crops(
             if not crop.size:
                 continue
             directory = root / f"{shot:04d}_{track_id:04d}"
-            directory.mkdir(parents=True, exist_ok=True)
+            if directory not in made:
+                directory.mkdir(parents=True, exist_ok=True)
+                made.add(directory)
             name = f"{candidate['kind']}_{index:06d}.jpg"
-            cv2.imwrite(str(directory / name), crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            writes.append(
+                writer.submit(
+                    cv2.imwrite,
+                    str(directory / name),
+                    crop.copy(),
+                    [cv2.IMWRITE_JPEG_QUALITY, 95],
+                )
+            )
             candidate["path"] = f"tracks/{directory.name}/{name}"
+    writer.shutdown()
+    if not all(w.result() for w in writes):
+        raise RuntimeError(f"a crop under {root} failed to write")
 
 
 def run(cfg: Config) -> dict[str, Any]:
@@ -412,18 +421,23 @@ def run(cfg: Config) -> dict[str, Any]:
     download_models.ensure(PROFILER)
     weights = download_models.detector(PROFILER, cfg.detector)
     model = RTDETR(str(weights)) if "rtdetr" in weights.stem else YOLO(str(weights))
-    face_detector = cv2.FaceDetectorYN.create(
-        str(download_models.stage_dir(PROFILER) / FACE_MODEL),
-        "",
-        FACE_INPUT,
-        cfg.face_conf,
-        0.3,
-        5000,
-    )
 
     gated = [s for s in routing["shots"] if "detection_tracking" in s["experts"]]
     faces_wanted = {int(s["index"]) for s in routing["shots"] if "face" in s["experts"]}
     wanted = _wanted(gated, max(1, cfg.det_stride)) if gated else {}
+
+    face_model = str(download_models.stage_dir(PROFILER) / FACE_MODEL)
+    yunet_pool: ProcessPoolExecutor | None = None
+    if faces_wanted and "fork" in multiprocessing.get_all_start_methods():
+        # OpenCV's dnn is not thread-safe, so YuNet runs in processes; fork keeps this module.
+        yunet_pool = ProcessPoolExecutor(
+            FACE_WORKERS,
+            mp_context=multiprocessing.get_context("fork"),
+            initializer=_start_yunet,
+            initargs=(face_model, cfg.face_conf),
+        )
+    elif faces_wanted:
+        _start_yunet(face_model, cfg.face_conf)
 
     crops_root = cfg.out_root / "tracks"
     if crops_root.exists():
@@ -447,6 +461,8 @@ def run(cfg: Config) -> dict[str, Any]:
             device=device,
             verbose=False,
         )
+        # The whole batch is tracked first; then all its face crops go to YuNet at once.
+        rows: list[tuple[int, Array, int, int, list[int], float, FaceCrop | None]] = []
         for (index, image), result in zip(batch, results):
             shot = wanted[index]
             persons, objects = _split(result.boxes, result.names, cfg.det_conf)
@@ -455,9 +471,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     (index, box) for box in objects
                 )
 
-            # A fresh tracker per shot: association across a cut is meaningless.
-            # Built once per shot, never with setdefault: that evaluates its default every
-            # call, and each tracker constructed resets the global track id counter.
+            # One tracker per shot, built by get-then-insert: each construction resets ids.
             tracker = trackers.get(shot)
             if tracker is None:
                 tracker = _make_tracker(cfg.tracker, cfg, fps)
@@ -465,44 +479,49 @@ def run(cfg: Config) -> dict[str, Any]:
             for row in tracker.update(persons, image):
                 x1, y1, x2, y2, track_id = (round(float(v)) for v in row[:5])
                 body = [x1, y1, x2, y2]
-                score = round(float(row[5]), 3)
-                face = (
-                    _face_in(face_detector, image, body, cfg.face_conf)
-                    if shot in faces_wanted
-                    else None
-                )
-                observations.setdefault(shot, {}).setdefault(track_id, {})[index] = {
-                    "body": body,
-                    "body_score": score,
-                    "face": face["box"] if face else None,
-                    "face_score": face["score"] if face else None,
-                }
+                crop = _face_crop(image, body) if shot in faces_wanted else None
+                rows.append((index, image, shot, track_id, body, round(float(row[5]), 3), crop))
 
-                region = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
-                if region.size:
-                    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-                    crop_pool.setdefault(shot, {}).setdefault(track_id, []).append(
-                        {
-                            "frame": index,
-                            "kind": "face" if face else "body",
-                            "box": face["box"] if face else body,
-                            "path": None,
-                            "quality": face["score"] if face else score,
-                            "frontality": face["frontality"] if face else None,
-                            "sharpness": round(
-                                float(cv2.Laplacian(gray, cv2.CV_32F).var()), 1
-                            ),
-                            "area": float((y2 - y1) * (x2 - x1)),
-                        }
-                    )
+        canvases = [crop[0] for *_, crop in rows if crop is not None]
+        found = iter(
+            list(yunet_pool.map(_yunet, canvases, chunksize=8))
+            if yunet_pool is not None
+            else [_yunet(c) for c in canvases]
+        )
+        for index, image, shot, track_id, body, score, crop in rows:
+            face = _face_from(next(found), crop, cfg.face_conf) if crop is not None else None
+            x1, y1, x2, y2 = body
+            observations.setdefault(shot, {}).setdefault(track_id, {})[index] = {
+                "body": body,
+                "body_score": score,
+                "face": face["box"] if face else None,
+                "face_score": face["score"] if face else None,
+            }
+
+            region = image[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+            if region.size:
+                gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+                crop_pool.setdefault(shot, {}).setdefault(track_id, []).append(
+                    {
+                        "frame": index,
+                        "kind": "face" if face else "body",
+                        "box": face["box"] if face else body,
+                        "path": None,
+                        "quality": face["score"] if face else score,
+                        "frontality": face["frontality"] if face else None,
+                        "sharpness": round(
+                            float(cv2.Laplacian(gray, cv2.CV_32F).var()), 1
+                        ),
+                        "area": float((y2 - y1) * (x2 - x1)),
+                    }
+                )
         batch.clear()
 
     if wanted:
         started = time.perf_counter()
         stream = _source(cfg, wanted, frame_count)
         while True:
-            # Timed around the pull alone, so read_seconds compares frame sources rather
-            # than the detector that dominates the rest of the loop.
+            # read_seconds times the pull alone, so it compares frame sources.
             clock = time.perf_counter()
             item = next(stream, None)
             read_seconds += time.perf_counter() - clock
@@ -514,12 +533,10 @@ def run(cfg: Config) -> dict[str, Any]:
                 flush()
         flush()
         total_seconds = time.perf_counter() - started
+    if yunet_pool is not None:
+        yunet_pool.shutdown()
 
-    # Face and body crops are ranked separately: they feed the two different conditional
-    # experts, and one pool of five mixed kinds can leave either expert with nothing.
-    # Interpolate and drop short tracks before anything else, so crops are never written for
-    # a track that will not appear, and so ids can be renumbered densely. ByteTrack's own ids
-    # are sparse: it burns one per candidate track and most never confirm.
+    # Short tracks go before crops are written, so every crop has a track and ids are dense.
     kept: dict[int, list[dict[str, Any]]] = {}
     for index, by_id in observations.items():
         survivors: list[dict[str, Any]] = []
@@ -547,7 +564,7 @@ def run(cfg: Config) -> dict[str, Any]:
         for track in survivors:
             pool = crop_pool.get(index, {}).get(int(track["tracker_id"]), [])
             chosen: list[dict[str, Any]] = []
-            for kind in ("face", "body"):
+            for kind in ("face", "body"):  # ranked apart: they feed different experts in 07
                 same = [c for c in pool if c["kind"] == kind]
                 if same:
                     _score_pool(same)
