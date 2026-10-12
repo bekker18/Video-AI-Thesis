@@ -1,5 +1,4 @@
-"""03-profiler: cheap detectors over each shot's keyframes, producing the presence flags
-04-router branches on."""
+"""03-profiler: cheap detectors over each shot's keyframes, giving the flags 04-router branches on."""
 
 from __future__ import annotations
 
@@ -23,6 +22,7 @@ PERSON = "person"
 FACE_INPUT = (320, 320)  # YuNet runs on the person crop, not the whole frame
 TEXT_INPUT = (736, 736)  # multiple of 32, as the DB model requires
 TEXT_MEAN = (122.68, 116.78, 103.94)
+DETECT_BATCH = 16  # keyframes per detector pass; one pass over all of them outgrew 8 GB
 
 
 def _device(name: str) -> str:
@@ -46,11 +46,20 @@ def _read_segmentation(json_dir: Path) -> dict[str, Any]:
 def _detect(
     weights: Path, images: list[Array], conf: float, device: str
 ) -> list[list[dict[str, Any]]]:
-    """One forward pass over every keyframe; persons and objects come out together."""
+    """Persons and objects from one model, DETECT_BATCH keyframes per pass."""
     from ultralytics import RTDETR, YOLO
 
     model = RTDETR(str(weights)) if "rtdetr" in weights.stem else YOLO(str(weights))
-    results = model.predict(images, conf=conf, device=device, verbose=False)
+    results = [
+        result
+        for start in range(0, len(images), DETECT_BATCH)
+        for result in model.predict(
+            images[start : start + DETECT_BATCH],
+            conf=conf,
+            device=device,
+            verbose=False,
+        )
+    ]
 
     frames: list[list[dict[str, Any]]] = []
     for result in results:
