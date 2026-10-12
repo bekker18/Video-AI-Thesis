@@ -178,9 +178,10 @@ def _ethnicity(
         segment, crop = crops[int(entry["frame"])]
         if segment not in live:
             footage += 1
-        elif float(crop["area"]) < cfg.identity_min_area or float(
-            crop["frontality"] or 0.0
-        ) < cfg.identity_min_front:
+        elif (
+            float(crop["area"]) < cfg.identity_min_area
+            or float(crop["frontality"] or 0.0) < cfg.identity_min_front
+        ):
             quality += 1
         else:
             kept.append(entry["ethnicity"])
@@ -197,7 +198,9 @@ def _cross_check(
 ) -> dict[str, Any]:
     """InsightFace genderage against FairFace's gender and age heads, crop by crop."""
     theirs = {int(f["frame"]): f for f in fairface}
-    pairs = [(g, theirs[int(g["frame"])]) for g in gender_age if int(g["frame"]) in theirs]
+    pairs = [
+        (g, theirs[int(g["frame"])]) for g in gender_age if int(g["frame"]) in theirs
+    ]
     if not pairs:
         return {"n": 0}
     gender = sum(1 for g, f in pairs if g["gender"] == _top(f["gender"]))
@@ -213,7 +216,9 @@ def _affect(emotions: list[dict[str, Any]]) -> dict[str, Any]:
     if not emotions:
         return {}
     labels = tuple(sorted(emotions[0]["scores"]))
-    out: dict[str, Any] = {"emotion": _distribution([e["scores"] for e in emotions], labels)}
+    out: dict[str, Any] = {
+        "emotion": _distribution([e["scores"] for e in emotions], labels)
+    }
     for axis in ("valence", "arousal"):
         present = [float(e[axis]) for e in emotions if e.get(axis) is not None]
         if present:
@@ -303,7 +308,9 @@ def _person(
         record["gaze"] = {
             "n": len(gazes),
             "in_frame": _stats(inside),
-            "in_frame_share": round(sum(1 for p in inside if p >= IN_FRAME) / len(inside), 3),
+            "in_frame_share": round(
+                sum(1 for p in inside if p >= IN_FRAME) / len(inside), 3
+            ),
         }
     address = _address(series, cfg.address_deg)
     if address["n"]:
@@ -408,15 +415,23 @@ def _plastic(keyframes: list[dict[str, Any]], cfg: Config) -> dict[str, Any]:
 
 def _colour(keyframes: list[dict[str, Any]]) -> dict[str, Any]:
     """Mean histogram, and 05's colour cells merged across keyframes by share."""
-    hists = [k["classical"]["histogram"] for k in keyframes if "histogram" in k["classical"]]
+    hists = [
+        k["classical"]["histogram"] for k in keyframes if "histogram" in k["classical"]
+    ]
     cells: dict[int, list[tuple[float, list[int]]]] = {}
     for keyframe in keyframes:
         for entry in keyframe["classical"].get("palette", []):
-            cells.setdefault(int(entry["cell"]), []).append((float(entry["share"]), entry["rgb"]))
+            cells.setdefault(int(entry["cell"]), []).append(
+                (float(entry["share"]), entry["rgb"])
+            )
     palette: list[dict[str, Any]] = []
     for parts in cells.values():
         weight = sum(share for share, _ in parts)
-        rgb = [round(sum(share * c[i] for share, c in parts) / weight) for i in range(3)]
+        if weight <= 0:  # 05 rounds a cell of a few pixels to share 0.0
+            continue
+        rgb = [
+            round(sum(share * c[i] for share, c in parts) / weight) for i in range(3)
+        ]
         palette.append({"rgb": rgb, "share": round(weight / len(keyframes), 4)})
     palette.sort(key=lambda p: (-float(p["share"]), p["rgb"]))
     out: dict[str, Any] = {"palette": palette[:PALETTE]}
@@ -455,7 +470,10 @@ def _things(keyframes: list[dict[str, Any]], top: int) -> dict[str, Any]:
             {
                 "label": label,
                 "n": len(rows),
-                **{k: round(float(v), 4) for k, v in zip(("x", "y", "centrality", "area", "disparity"), mean)},
+                **{
+                    k: round(float(v), 4)
+                    for k, v in zip(("x", "y", "centrality", "area", "disparity"), mean)
+                },
                 "spread": spread,
             }
         )
@@ -512,7 +530,9 @@ def _framing(shot: dict[str, Any], size: tuple[int, int]) -> dict[str, Any]:
         return max(0, min(height, box[3]) - max(0, box[1])) / height
 
     def area(box: list[int]) -> int:
-        return max(0, min(width, box[2]) - max(0, box[0])) * max(0, min(height, box[3]) - max(0, box[1]))
+        return max(0, min(width, box[2]) - max(0, box[0])) * max(
+            0, min(height, box[3]) - max(0, box[1])
+        )
 
     face_height: list[float] = []
     body_height: list[float] = []
@@ -541,7 +561,9 @@ def run(cfg: Config) -> dict[str, Any]:
     global_meta = _read(cfg.json_dir, "global.json", "05-global-experts")
     identity = _read(cfg.json_dir, "identity.json", "08-identity")
     if any("size" not in k for k in global_meta["keyframes"]):
-        raise RuntimeError("global.json predates 05's object depth; re-run 05-global-experts")
+        raise RuntimeError(
+            "global.json predates 05's object depth; re-run 05-global-experts"
+        )
 
     fps = float(segmentation["fps"])
     size = _frame_size(cfg, tracks_meta)
@@ -560,8 +582,13 @@ def run(cfg: Config) -> dict[str, Any]:
     by_shot: dict[int, list[dict[str, Any]]] = {}
     for keyframe in global_meta["keyframes"]:
         by_shot.setdefault(int(keyframe["shot"]), []).append(keyframe)
-    plastic = {int(s["index"]): _plastic(by_shot.get(int(s["index"]), []), cfg) for s in conditional["shots"]}
-    live = {i for i, p in plastic.items() if (p.get("medium") or {}).get("modal") == LIVE}
+    plastic = {
+        int(s["index"]): _plastic(by_shot.get(int(s["index"]), []), cfg)
+        for s in conditional["shots"]
+    }
+    live = {
+        i for i, p in plastic.items() if (p.get("medium") or {}).get("modal") == LIVE
+    }
 
     persons: list[dict[str, Any]] = []
     everyone: list[dict[str, Any]] = []
@@ -581,9 +608,13 @@ def run(cfg: Config) -> dict[str, Any]:
             "fairface": [],
             "clip": [],
         }
-        crops: dict[int, tuple[int, dict[str, Any]]] = {}  # frames are unique within a person
+        crops: dict[
+            int, tuple[int, dict[str, Any]]
+        ] = {}  # frames are unique within a person
         for key in present:
-            crops.update({int(c["frame"]): (key[0], c) for c in spans[key]["crops"]["face"]})
+            crops.update(
+                {int(c["frame"]): (key[0], c) for c in spans[key]["crops"]["face"]}
+            )
             source = tracks_by_key.get(key)
             if source is None:
                 continue
@@ -594,7 +625,14 @@ def run(cfg: Config) -> dict[str, Any]:
         everyone += series
 
         record = _person(
-            person, series, [(k[0], spans[k]) for k in present], attrs, crops, live, fps, cfg
+            person,
+            series,
+            [(k[0], spans[k]) for k in present],
+            attrs,
+            crops,
+            live,
+            fps,
+            cfg,
         )
         if record["support"]["series"] < 2:
             thin += 1
@@ -612,7 +650,9 @@ def run(cfg: Config) -> dict[str, Any]:
         index = int(shot["index"])
         source = next(s for s in tracks_meta["shots"] if int(s["index"]) == index)
         start, end = int(shot["start_frame"]), int(shot["end_frame"])
-        detected = len(range(start, end + 1, stride)) + (1 if (end - start) % stride else 0)
+        detected = len(range(start, end + 1, stride)) + (
+            1 if (end - start) % stride else 0
+        )
         shots.append(
             {
                 "index": index,
