@@ -34,8 +34,14 @@ THINGS = 80  # COCO panoptic ids below this are countable objects, the rest is s
 
 # two prompts per medium, averaged
 MEDIUM = {
-    "live action": ("a photo of a real scene", "a frame from live-action video footage"),
-    "2D animation": ("a frame from a 2D anime cartoon", "a hand-drawn animated cartoon"),
+    "live action": (
+        "a photo of a real scene",
+        "a frame from live-action video footage",
+    ),
+    "2D animation": (
+        "a frame from a 2D anime cartoon",
+        "a hand-drawn animated cartoon",
+    ),
     "CGI": ("a 3D computer-generated CGI render", "a frame from a 3D animated film"),
 }
 CLIP_SCALE = 100.0  # CLIP's logit scale
@@ -59,7 +65,9 @@ def _free(model: Any) -> None:
         torch.cuda.empty_cache()
 
 
-def _keyframes(out_root: Path, json_dir: Path) -> tuple[list[str], list[Path], list[int]]:
+def _keyframes(
+    out_root: Path, json_dir: Path
+) -> tuple[list[str], list[Path], list[int]]:
     path = json_dir / "segmentation.json"
     if not path.exists():
         raise RuntimeError(f"missing {path}; run 02-segmentation first")
@@ -96,7 +104,10 @@ def _palette(rgb: Array) -> list[dict[str, Any]]:
     cells = rgb // (256 // PALETTE_LEVELS)
     index = (cells[:, 0] * PALETTE_LEVELS + cells[:, 1]) * PALETTE_LEVELS + cells[:, 2]
     counts = np.bincount(index, minlength=PALETTE_LEVELS**3)
-    sums = [np.bincount(index, weights=rgb[:, c], minlength=PALETTE_LEVELS**3) for c in range(3)]
+    sums = [
+        np.bincount(index, weights=rgb[:, c], minlength=PALETTE_LEVELS**3)
+        for c in range(3)
+    ]
     order = np.argsort(-counts, kind="stable")[:PALETTE_KEPT]
     return [
         {
@@ -120,7 +131,9 @@ def _classical(image: Array) -> dict[str, Any]:
     histogram = {
         name: [
             round(float(v), 4)
-            for v in np.bincount(rgb[:, c] * HISTOGRAM_BINS // 256, minlength=HISTOGRAM_BINS)
+            for v in np.bincount(
+                rgb[:, c] * HISTOGRAM_BINS // 256, minlength=HISTOGRAM_BINS
+            )
             / len(rgb)
         ]
         for c, name in enumerate(("r", "g", "b"))
@@ -253,7 +266,11 @@ def _edges(images: list[Array], device: str, model_dir: Path) -> list[Array]:
 
 
 def _lines(path: Path) -> list[list[str]]:
-    return [line.split() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [
+        line.split()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
 
 
 def _places(model_dir: Path) -> tuple[list[str], Array]:
@@ -327,7 +344,7 @@ def _encode_text(
     model, _, _ = open_clip.create_model_and_transforms(
         CLIP_MODEL, cache_dir=str(clip_cache)
     )
-    tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
+    tokenizer = open_clip.get_tokenizer(CLIP_MODEL, cache_dir=str(clip_cache))
     model = model.to(device).eval()
 
     out: list[Array] = []
@@ -401,7 +418,10 @@ def _semantic(
         source.repo, cache_dir=str(cache), revision=source.revision
     )
     model: Any = SegformerForSemanticSegmentation.from_pretrained(
-        source.repo, cache_dir=str(cache), revision=source.revision, use_safetensors=True
+        source.repo,
+        cache_dir=str(cache),
+        revision=source.revision,
+        use_safetensors=True,
     )
     model = model.to(device).eval()
     names = {int(k): v for k, v in model.config.id2label.items()}

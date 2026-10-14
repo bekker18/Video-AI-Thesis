@@ -436,7 +436,7 @@ def _clip_attributes(
     model, _, preprocess = open_clip.create_model_and_transforms(
         CLIP_MODEL, cache_dir=str(cache)
     )
-    tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
+    tokenizer = open_clip.get_tokenizer(CLIP_MODEL, cache_dir=str(cache))
     model = model.to(device).eval()
 
     crop_size = 256
