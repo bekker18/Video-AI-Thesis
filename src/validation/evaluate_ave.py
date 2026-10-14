@@ -101,43 +101,41 @@ def _cut_hits(truth: list[int], found: list[int], tolerance: int) -> int:
 def _categorical(
     rows: list[Row], order: tuple[str, ...], ordinal: bool
 ) -> dict[str, Any]:
-    """A prediction counts if it is any of the shot's labels; `None` is an abstention."""
-    labelled = [(t, p) for t, p in rows if t]
+    """Shots with one label only, so every figure follows from the confusion matrix; `None` is an abstention."""
+    labelled = [(next(iter(t)), p) for t, p in rows if len(t) == 1]
     answered = [(t, p) for t, p in labelled if p is not None]
     out: dict[str, Any] = {
         "n": len(labelled),
+        "two_labels": sum(1 for t, _ in rows if len(t) > 1),
         "answered": len(answered),
         "coverage": _ratio(len(answered), len(labelled)),
     }
     if not answered:
         return out
-    classes = [c for c in order if any(c in t for t, _ in answered)]
-    recalls = [
-        sum(1 for t, p in answered if c in t and p in t)
-        / sum(1 for t, _ in answered if c in t)
-        for c in classes
-    ]
-    confusion: dict[str, Counter[str]] = {}
-    for t, p in answered:
-        confusion.setdefault(p if p in t else min(t, key=order.index), Counter())[
-            p
-        ] += 1
-    out["accuracy"] = _ratio(sum(1 for t, p in answered if p in t), len(answered))
-    out["balanced_accuracy"] = round(float(np.mean(recalls)), 3)
-    out["majority_baseline"] = _ratio(
-        max(sum(1 for t, _ in answered if c in t) for c in classes), len(answered)
+    pairs = Counter(answered)
+    truths = Counter(t for t, _ in answered)
+    answers = Counter(p for _, p in answered)
+    out["accuracy"] = _ratio(sum(pairs[c, c] for c in order), len(answered))
+    out["balanced_accuracy"] = round(
+        float(np.mean([pairs[c, c] / truths[c] for c in order if truths[c]])), 3
     )
+    out["majority_baseline"] = _ratio(max(truths.values()), len(answered))
     if ordinal:
-        near = sum(
-            1
-            for t, p in answered
-            if min(abs(order.index(p) - order.index(c)) for c in t) <= 1
-        )
+        near = sum(1 for t, p in answered if abs(order.index(t) - order.index(p)) <= 1)
         out["within_one"] = _ratio(near, len(answered))
+    out["per_class"] = {
+        c: {
+            "shots": truths[c],
+            "correct": pairs[c, c],
+            "recall": _ratio(pairs[c, c], truths[c]),
+            "answered": answers[c],
+            "precision": _ratio(pairs[c, c], answers[c]),
+        }
+        for c in order
+        if truths[c] or answers[c]
+    }
     out["confusion"] = {
-        row: {c: confusion[row][c] for c in order if confusion[row][c]}
-        for row in order
-        if row in confusion
+        t: {p: pairs[t, p] for p in order if pairs[t, p]} for t in order if truths[t]
     }
     return out
 
@@ -293,11 +291,20 @@ def main() -> None:
         total_shots += len(truth)
         total_segments += len(segments)
 
-        cuts = [start for start, _, _ in truth[1:]]
+        gaps = [(a[1], b[0]) for a, b in zip(truth, truth[1:]) if b[0] - a[1] > 1]
+        cuts = sorted(
+            [start for start, _, _ in truth[1:]] + [end + 1 for end, _ in gaps]
+        )
         found = [
             int(s["start_frame"])
             for s in segments
             if first < int(s["start_frame"]) <= last
+            and not any(
+                end + 1 + args.tolerance
+                < int(s["start_frame"])
+                < start - args.tolerance
+                for end, start in gaps
+            )
         ]
         truth_cuts += len(cuts)
         found_cuts += len(found)
@@ -420,9 +427,7 @@ def main() -> None:
             "matched": cut_hits,
             "precision": precision,
             "recall": recall,
-            "f1": round(2 * precision * recall / (precision + recall), 3)
-            if precision and recall
-            else None,
+            "f1": _ratio(2 * cut_hits, truth_cuts + found_cuts),
         },
         "fields": fields,
         "presence": {
