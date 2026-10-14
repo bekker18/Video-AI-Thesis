@@ -58,8 +58,19 @@ FAIRFACE_GROUPS = (
     "Indian",
     "Middle Eastern",
 )
-FAIRFACE_AGES = ("0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+")
+FAIRFACE_AGES = (
+    "0-2",
+    "3-9",
+    "10-19",
+    "20-29",
+    "30-39",
+    "40-49",
+    "50-59",
+    "60-69",
+    "70+",
+)
 FAIRFACE_BATCH = 32
+CLIP_BATCH = 32
 
 # insightface's 5-point template for a 112x112 aligned face.
 ARCFACE_TEMPLATE = np.array(
@@ -320,8 +331,9 @@ def _emotions(session: Any, crops: list[Array]) -> list[dict[str, Any]]:
 
 def _embed_faces(session: Any, faces: list[Array]) -> list[Array]:
     tensors = [
-        ((cv2.cvtColor(face, cv2.COLOR_BGR2RGB).astype(np.float32) - 127.5) / 127.5)
-        .transpose(2, 0, 1)
+        (
+            (cv2.cvtColor(face, cv2.COLOR_BGR2RGB).astype(np.float32) - 127.5) / 127.5
+        ).transpose(2, 0, 1)
         for face in faces
     ]
     out: list[Array] = []
@@ -438,21 +450,26 @@ def _clip_attributes(
         text = model.encode_text(tokens).float()
         text /= text.norm(dim=-1, keepdim=True)
 
-        batch = np.stack(
-            [
-                cv2.cvtColor(
-                    cv2.resize(c, (crop_size, crop_size), interpolation=cv2.INTER_AREA),
-                    cv2.COLOR_BGR2RGB,
-                )
-                for c in crops
-            ]
-        )
-        tensor = (
-            torch.from_numpy(batch).to(device).permute(0, 3, 1, 2).float().div_(255)
-        )
-        image = model.encode_image(tensor).float()
-        image /= image.norm(dim=-1, keepdim=True)
-        scores = (image @ text.T).cpu().numpy()
+        rows: list[Array] = []
+        for start in range(0, len(crops), CLIP_BATCH):
+            batch = np.stack(
+                [
+                    cv2.cvtColor(
+                        cv2.resize(
+                            c, (crop_size, crop_size), interpolation=cv2.INTER_AREA
+                        ),
+                        cv2.COLOR_BGR2RGB,
+                    )
+                    for c in crops[start : start + CLIP_BATCH]
+                ]
+            )
+            tensor = (
+                torch.from_numpy(batch).to(device).permute(0, 3, 1, 2).float().div_(255)
+            )
+            image = model.encode_image(tensor).float()
+            image /= image.norm(dim=-1, keepdim=True)
+            rows.append((image @ text.T).cpu().numpy())
+        scores = np.concatenate(rows)
 
     del model
     if device == "cuda":
@@ -484,19 +501,33 @@ def _fairface(crops: list[Array], device: str, path: Path) -> list[dict[str, Any
         for start in range(0, len(crops), FAIRFACE_BATCH):
             batch = np.stack(
                 [
-                    (cv2.cvtColor(c, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0 - IMAGENET_MEAN)
+                    (
+                        cv2.cvtColor(c, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                        - IMAGENET_MEAN
+                    )
                     / IMAGENET_STD
                     for c in crops[start : start + FAIRFACE_BATCH]
                 ]
             ).transpose(0, 3, 1, 2)
             logits = model(torch.from_numpy(batch).to(device)).float().cpu()
-            heads = [logits[:, a:b].softmax(dim=-1).numpy() for a, b in ((0, 7), (7, 9), (9, 18))]
+            heads = [
+                logits[:, a:b].softmax(dim=-1).numpy()
+                for a, b in ((0, 7), (7, 9), (9, 18))
+            ]
             for groups, gender, age in zip(*heads):
                 out.append(
                     {
-                        "ethnicity": {k: round(float(p), 4) for k, p in zip(FAIRFACE_GROUPS, groups)},
-                        "gender": {k: round(float(p), 4) for k, p in zip(("male", "female"), gender)},
-                        "age": {k: round(float(p), 4) for k, p in zip(FAIRFACE_AGES, age)},
+                        "ethnicity": {
+                            k: round(float(p), 4)
+                            for k, p in zip(FAIRFACE_GROUPS, groups)
+                        },
+                        "gender": {
+                            k: round(float(p), 4)
+                            for k, p in zip(("male", "female"), gender)
+                        },
+                        "age": {
+                            k: round(float(p), 4) for k, p in zip(FAIRFACE_AGES, age)
+                        },
                     }
                 )
 
@@ -519,7 +550,9 @@ def _gaze_model(device: str) -> tuple[Any, Any]:
     return model.to(device).eval(), transform
 
 
-def _head_box(face: list[int], width: int, height: int) -> tuple[float, float, float, float]:
+def _head_box(
+    face: list[int], width: int, height: int
+) -> tuple[float, float, float, float]:
     """YuNet's face box grown to take in hair and chin, as Gaze-LLE expects a head, normalised."""
     x1, y1, x2, y2 = face
     w, h = x2 - x1, y2 - y1
@@ -545,7 +578,9 @@ def _gaze_pass(
     with torch.no_grad():
         out = model({"images": tensor.unsqueeze(0).to(device), "bboxes": boxes})
     results: list[dict[str, Any]] = []
-    for heatmap, inside in zip(out["heatmap"][0].cpu().numpy(), out["inout"][0].cpu().numpy()):
+    for heatmap, inside in zip(
+        out["heatmap"][0].cpu().numpy(), out["inout"][0].cpu().numpy()
+    ):
         row, col = np.unravel_index(int(np.argmax(heatmap)), heatmap.shape)
         results.append(
             {
@@ -630,7 +665,11 @@ def run(cfg: Config) -> dict[str, Any]:
                     experts = gates.get(shot, set())
                     sample: dict[str, Any] = {"frame": index}
 
-                    if "face" in experts and row["face"] and face_landmarker is not None:
+                    if (
+                        "face" in experts
+                        and row["face"]
+                        and face_landmarker is not None
+                    ):
                         crop = _crop(image, row["face"], cfg.crop_pad)
                         found = (
                             _face_pass(face_landmarker, crop, cfg.blendshapes)
@@ -650,14 +689,19 @@ def run(cfg: Config) -> dict[str, Any]:
                         if crop.size:
                             sample["pose"] = None
                             bodies.append(
-                                (sample, executor.submit(_pose_from, poses, crop.copy()))
+                                (
+                                    sample,
+                                    executor.submit(_pose_from, poses, crop.copy()),
+                                )
                             )
 
                     observed.append(((shot, track_id), sample))
 
                 # Gaze needs every head in the frame at once, so it runs after the frame's rows.
                 if gaze is not None and looking:
-                    found_gaze = _gaze_pass(gaze, image, [face for _, face in looking], device)
+                    found_gaze = _gaze_pass(
+                        gaze, image, [face for _, face in looking], device
+                    )
                     for (sample, _), result in zip(looking, found_gaze):
                         sample["gaze"] = result
 
@@ -668,7 +712,9 @@ def run(cfg: Config) -> dict[str, Any]:
         else:
             del sample["pose"]
     if emotion is not None and feelings:
-        for (sample, _), feeling in zip(feelings, _emotions(emotion, [c for _, c in feelings])):
+        for (sample, _), feeling in zip(
+            feelings, _emotions(emotion, [c for _, c in feelings])
+        ):
             sample["emotion"] = feeling
 
     series: dict[tuple[int, int], list[dict[str, Any]]] = {}
@@ -734,7 +780,9 @@ def run(cfg: Config) -> dict[str, Any]:
             clip_crops.append(image)  # CLIP reads the unaligned crop
             clip_keys.append((shot, track_id))
             fair_crops.append(
-                cv2.warpAffine(image, matrix * 2, (224, 224), borderValue=(0.0, 0.0, 0.0))
+                cv2.warpAffine(
+                    image, matrix * 2, (224, 224), borderValue=(0.0, 0.0, 0.0)
+                )
             )
             fair_keys.append((shot, track_id, frame))
 
@@ -750,7 +798,9 @@ def run(cfg: Config) -> dict[str, Any]:
                 per_track[key]["clip"].append(labels)
             heads = _fairface(fair_crops, device, model_dir / FAIRFACE_MODEL)
             for (shot, track_id, frame), result in zip(fair_keys, heads):
-                per_track[(shot, track_id)]["fairface"].append({"frame": frame, **result})
+                per_track[(shot, track_id)]["fairface"].append(
+                    {"frame": frame, **result}
+                )
 
     body_jobs: list[tuple[int, int, int, Path]] = []
     for shot in tracks_meta["shots"]:
@@ -867,7 +917,9 @@ def run(cfg: Config) -> dict[str, Any]:
         "series_stride": cfg.series_stride,
         "series_samples": sum(len(v) for v in series.values()),
         "tracks_with_series": len(series),
-        "gaze_samples": sum(1 for samples in series.values() for s in samples if "gaze" in s),
+        "gaze_samples": sum(
+            1 for samples in series.values() for s in samples if "gaze" in s
+        ),
         "face_embeddings": len(embeddings),
         "body_embeddings": int(body_embeddings.shape[0]),
         "text_regions": sum(len(v) for v in text_by_shot.values()),
