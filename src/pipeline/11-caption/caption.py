@@ -25,9 +25,22 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 MAX_WORDS = 12
 MAX_TOKENS = 40
 TOP = 5  # labels kept per hint line
-ADDRESS = 0.5  # share of a person's samples looking into the camera for the hint to say so
+ADDRESS = (
+    0.5  # share of a person's samples looking into the camera for the hint to say so
+)
 ANIMALS = frozenset(
-    {"bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"}
+    {
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe",
+    }
 )
 
 INSTRUCTION = (
@@ -113,14 +126,18 @@ def _hints(
         for name, share in coverage.items():
             name = str(name).strip()  # ADE20K has "bed "
             regions[name] = regions.get(name, 0.0) + seconds * float(share["mean"])
-        for name, p in ((plastic.get("medium") or {}).get("distribution") or {}).items():
+        for name, p in (
+            (plastic.get("medium") or {}).get("distribution") or {}
+        ).items():
             mediums[name] = mediums.get(name, 0.0) + seconds * float(p)
         for found in shot["objects"]:
             label = found["label"]
             if label not in ANIMALS:
                 objects[label] = objects.get(label, 0.0) + int(found["frame_count"])
             elif float(found["share"]) >= cfg.subject_min:  # as 12's subjects
-                animals[label] = animals.get(label, 0.0) + seconds * float(found["share"])
+                animals[label] = animals.get(label, 0.0) + seconds * float(
+                    found["share"]
+                )
         movement = (shot.get("camera") or {}).get("movement")
         if movement and movement != "unknown":
             moves[movement] = moves.get(movement, 0.0) + seconds
@@ -154,7 +171,11 @@ def _hints(
             and float(p["address"]["share"]) >= ADDRESS
         )
         if addressing:
-            people += "; one looks into the camera" if addressing == 1 else "; some look into the camera"
+            people += (
+                "; one looks into the camera"
+                if addressing == 1
+                else "; some look into the camera"
+            )
     else:
         people = "none"
 
@@ -279,7 +300,7 @@ def _clip_score(caption: str, embeddings: Array, device: str, cache: Path) -> fl
     model, _, _ = open_clip.create_model_and_transforms(
         CLIP_MODEL, cache_dir=str(cache)
     )
-    tokenizer = open_clip.get_tokenizer(CLIP_MODEL)
+    tokenizer = open_clip.get_tokenizer(CLIP_MODEL, cache_dir=str(cache))
     model = model.to(device).eval()
     with torch.no_grad():
         text = model.encode_text(tokenizer([caption]).to(device)).float()
