@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from collections import Counter
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 Row: TypeAlias = tuple[set[str], str | None]
+Span: TypeAlias = tuple[int, int, dict[str, Any]]
 
 MOTION = {
     "locked": "static",
@@ -85,6 +87,44 @@ def _align(
         if table[i, j] >= floor and int(table[:, j].argmax()) == i:
             pairs.append((i, j))
     return pairs
+
+
+def spans(
+    shots: dict[str, Any], segmentation: dict[str, Any]
+) -> tuple[list[Span], list[dict[str, Any]], list[tuple[int, int]]]:
+    """AVE's shots as frame spans, and 02's segments inside the labelled span, clipped to it."""
+    fps = float(segmentation["fps"])
+    truth = sorted(
+        (
+            (
+                round(float(s["start-time"][0]) * fps),
+                round(float(s["end-time"][0]) * fps),
+                s,
+            )
+            for s in shots.values()
+        ),
+        key=lambda t: t[0],
+    )
+    first, last = truth[0][0], max(end for _, end, _ in truth)
+    segments = [
+        s
+        for s in segmentation["shots"]
+        if s["end_frame"] >= first and s["start_frame"] <= last
+    ]
+    clipped = [
+        (max(int(s["start_frame"]), first), min(int(s["end_frame"]), last))
+        for s in segments
+    ]
+    return truth, segments, clipped
+
+
+def matched(
+    shots: dict[str, Any], segmentation: dict[str, Any], floor: float
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Each AVE shot's labels with the 02 segment it is compared against."""
+    truth, segments, clipped = spans(shots, segmentation)
+    pairs = _align([(a, b) for a, b, _ in truth], clipped, floor)
+    return [(truth[i][2], segments[j]) for i, j in pairs]
 
 
 def _cut_hits(truth: list[int], found: list[int], tolerance: int) -> int:
@@ -251,7 +291,7 @@ def main() -> None:
     outdoor: list[tuple[set[str], float]] = []
     items: list[tuple[str, int, Array]] = []
     stages = Counter[str]()
-    total_shots = total_segments = matched = 0
+    total_shots = total_segments = paired = 0
     truth_cuts = found_cuts = cut_hits = 0
 
     for scene in scenes:
@@ -265,33 +305,12 @@ def main() -> None:
             for k, v in (("profile", profile), ("tracks", tracks), ("identikit", kit))
             if v
         )
-        fps = float(segmentation["fps"])
-
-        truth = sorted(
-            (
-                (
-                    round(float(s["start-time"][0]) * fps),
-                    round(float(s["end-time"][0]) * fps),
-                    s,
-                )
-                for s in labels[scene].values()
-            ),
-            key=lambda t: t[0],
-        )
+        truth, segments, _ = spans(labels[scene], segmentation)
         first, last = truth[0][0], max(end for _, end, _ in truth)
-        segments = [
-            s
-            for s in segmentation["shots"]
-            if s["end_frame"] >= first and s["start_frame"] <= last
-        ]
-        clipped = [
-            (max(int(s["start_frame"]), first), min(int(s["end_frame"]), last))
-            for s in segments
-        ]
         total_shots += len(truth)
         total_segments += len(segments)
 
-        gaps = [(a[1], b[0]) for a, b in zip(truth, truth[1:]) if b[0] - a[1] > 1]
+        gaps = [(a[1], b[0]) for a, b in pairwise(truth) if b[0] - a[1] > 1]
         cuts = sorted(
             [start for start, _, _ in truth[1:]] + [end + 1 for end, _ in gaps]
         )
@@ -337,10 +356,9 @@ def main() -> None:
             for i in s["segments"]
         }
 
-        for i, j in _align([(a, b) for a, b, _ in truth], clipped, args.iou):
-            label, segment = truth[i][2], segments[j]
+        for label, segment in matched(labels[scene], segmentation, args.iou):
             index = int(segment["index"])
-            matched += 1
+            paired += 1
             people = _values(label, "num-people", PEOPLE)
             movement = (segment.get("camera") or {}).get("movement")
             rows["camera_motion"].append(
@@ -418,7 +436,7 @@ def main() -> None:
             "iou_floor": args.iou,
             "ave_shots": total_shots,
             "segments": total_segments,
-            "matched": matched,
+            "matched": paired,
         },
         "cuts": {
             "tolerance_frames": args.tolerance,
@@ -439,7 +457,7 @@ def main() -> None:
     args.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
     print(
-        f"{len(scenes)} scenes; {matched} of {total_shots} AVE shots matched a segment of {total_segments}"
+        f"{len(scenes)} scenes; {paired} of {total_shots} AVE shots matched a segment of {total_segments}"
     )
     print(f"cuts: precision {precision}, recall {recall}, f1 {report['cuts']['f1']}")
     for name, s in fields.items():
