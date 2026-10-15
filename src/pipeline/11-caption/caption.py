@@ -25,9 +25,7 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 MAX_WORDS = 12
 MAX_TOKENS = 40
 TOP = 5  # labels kept per hint line
-ADDRESS = (
-    0.5  # share of a person's samples looking into the camera for the hint to say so
-)
+ADDRESS = 0.5  # share of a person's samples into the camera for the hint to say so
 ANIMALS = frozenset(
     {
         "bird",
@@ -98,17 +96,24 @@ def _ranked(weights: dict[str, float]) -> list[str]:
     return [k for k, _ in sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))[:TOP]]
 
 
+def _peak_share(side: dict[str, Any], minimum: int) -> float:
+    """A direction's best segment share on `minimum` samples or more, as in 12."""
+    return max(
+        (s["hits"] / s["n"] for s in side.get("by_segment", []) if s["n"] >= minimum),
+        default=0.0,
+    )
+
+
 def _hints(
     aggregated: dict[str, Any],
     profile: dict[str, Any],
     relations: dict[str, Any],
     cfg: Config,
 ) -> str:
-    """The whole video in seven lines: tags, regions and objects from 09's whole_video, the
-    rest weighted by how long its segments last."""
+    """The whole video in seven lines, segment values weighted by duration."""
     shots = aggregated["shots"]
     video = aggregated["whole_video"]
-    floor, minimum = cfg.identikit_attention, cfg.relation_min
+    floor, minimum = cfg.relation_share, cfg.relation_min
     mediums: dict[str, float] = {}
     animals: dict[str, float] = {}
     moves: dict[str, float] = {}
@@ -121,12 +126,9 @@ def _hints(
         ).items():
             mediums[name] = mediums.get(name, 0.0) + seconds * float(p)
         for found in shot["objects"]:
-            label = found["label"]
-            if label in ANIMALS and float(found["share"]) >= cfg.subject_min:
-                # as 12's subjects
-                animals[label] = animals.get(label, 0.0) + seconds * float(
-                    found["share"]
-                )
+            label, share = found["label"], float(found["share"])
+            if label in ANIMALS and share >= cfg.subject_min:  # as 12's subjects
+                animals[label] = animals.get(label, 0.0) + seconds * share
         movement = (shot.get("camera") or {}).get("movement")
         if movement and movement != "unknown":
             moves[movement] = moves.get(movement, 0.0) + seconds
@@ -141,21 +143,14 @@ def _hints(
         )
         visible = f"up to {at_once} visible at once" if at_once > 1 else "one at a time"
         people = f"{visible}, on screen for {presence}"
-        # a direction counts on --relation-min samples or more, as 12 lists relations
         shares = [
-            [
-                float(r["attention"][side].get("share") or 0.0)
-                if int(r["attention"][side].get("n", 0)) >= minimum
-                else 0.0
-                for side in ("a_to_b", "b_to_a")
-            ]
+            [_peak_share(r["looks_at"][s], minimum) for s in ("a_to_b", "b_to_a")]
             for r in relations["relations"]
         ]
-        # Head orientation, not gaze, so the wording is about facing.
         if any(min(pair) >= floor for pair in shares):
-            people += "; some face each other"
+            people += "; some look at each other"
         elif any(max(pair) >= floor for pair in shares):
-            people += "; some turn towards others"
+            people += "; some look at others"
         addressing = sum(
             1
             for p in aggregated["persons"]

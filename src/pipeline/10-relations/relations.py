@@ -1,5 +1,4 @@
-"""10-relations: the edges between 09's persons - placement, attention by head orientation,
-where gaze lands, and affect synchrony - each with the frames and samples behind it."""
+"""10-relations: placement, gaze targets and affect synchrony between 09's persons."""
 
 from __future__ import annotations
 
@@ -14,9 +13,12 @@ import numpy as np
 from config import Config
 
 STAGE = "10-relations"
-IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the frame
+IN_FRAME = 0.3  # in-frame probability a look needs to land; tuned on UCO-LAEO
+LOOK_DEG = 20.0  # degrees a head may sit off the line of sight; tuned on UCO-LAEO
+HEAD_REACH = 0.58  # head bottom below body top, in box widths (median, 191,824 faces)
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
+Head: TypeAlias = tuple[float, float, float]  # x, top, bottom
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -39,94 +41,79 @@ def _overlaps(a: list[int], b: list[int]) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def _forward(pose: dict[str, float]) -> tuple[float, float]:
-    """Image-plane direction the head faces: R = Rz(roll) Ry(yaw) Rx(pitch), outward axis."""
-    yaw, pitch, roll = (math.radians(float(pose[k])) for k in ("yaw", "pitch", "roll"))
-    rx = np.array(
-        [
-            [1, 0, 0],
-            [0, math.cos(pitch), -math.sin(pitch)],
-            [0, math.sin(pitch), math.cos(pitch)],
-        ]
-    )
-    ry = np.array(
-        [
-            [math.cos(yaw), 0, math.sin(yaw)],
-            [0, 1, 0],
-            [-math.sin(yaw), 0, math.cos(yaw)],
-        ]
-    )
-    rz = np.array(
-        [
-            [math.cos(roll), -math.sin(roll), 0],
-            [math.sin(roll), math.cos(roll), 0],
-            [0, 0, 1],
-        ]
-    )
-    vector = (rz @ ry @ rx) @ np.array([0.0, 0.0, -1.0])
-    norm = float(np.linalg.norm(vector[:2]))
-    return (
-        (0.0, 0.0)
-        if norm < 1e-6
-        else (float(vector[0]) / norm, float(vector[1]) / norm)
+def _head_centre(face: list[int]) -> tuple[float, float]:
+    """Centre of the face box grown to a head, as 07 grows it for Gaze-LLE."""
+    return (face[0] + face[2]) / 2.0, (face[1] + face[3]) / 2.0 - 0.15 * (
+        face[3] - face[1]
     )
 
 
-def _attends(
-    samples: dict[int, dict[str, Any]],
-    boxes: dict[int, dict[str, Any]],
-    other: dict[int, dict[str, Any]],
-    limit: float,
-) -> dict[str, Any]:
-    """Share of shared frames where the head points within `limit` degrees of the other person."""
-    hits = 0
-    angles: list[float] = []
-    for frame, sample in sorted(samples.items()):
-        row, target = boxes.get(frame), other.get(frame)
-        if not row or not target or "head_pose" not in sample or not row["face"]:
+def _head_of(row: dict[str, Any]) -> Head:
+    """A vertical span: the face's head centre, else down from the body box's top."""
+    if row["face"]:
+        x, y = _head_centre(row["face"])
+        return x, y, y
+    x1, y1, x2, y2 = row["body"]
+    return (x1 + x2) / 2.0, y1, min(y2, y1 + HEAD_REACH * (x2 - x1))
+
+
+def _landed(
+    gaze: dict[str, Any],
+    face: list[int],
+    heads: dict[int, Head],
+    cut: float = IN_FRAME,
+    limit: float = LOOK_DEG,
+) -> int | None:
+    """Of heads within `limit` degrees of the sight line, the one nearest the point."""
+    if float(gaze["in_frame"]) < cut:
+        return None
+    x, y = _head_centre(face)
+    tx, ty = float(gaze["target"][0]), float(gaze["target"][1])
+    if math.hypot(tx - x, ty - y) < 1.0:
+        return None
+    own = (face[3] - face[1]) / 2
+    best: tuple[float, int] | None = None
+    for pid, (hx, top, bottom) in heads.items():
+        hy = min(max(ty, top), bottom)
+        # a head on the looker's own is a duplicate detection
+        if math.hypot(hx - x, hy - y) < own:
             continue
-        fx, fy = _centre(row["face"])
-        tx, ty = _centre(target["face"] or target["body"])
-        towards = np.array([tx - fx, ty - fy])
-        distance = float(np.linalg.norm(towards))
-        if distance < 1e-6:
+        turn = abs(math.atan2(hy - y, hx - x) - math.atan2(ty - y, tx - x))
+        if math.degrees(min(turn, 2 * math.pi - turn)) > limit:
             continue
-
-        facing = np.array(_forward(sample["head_pose"]))
-        cosine = float(np.clip(np.dot(facing, towards / distance), -1.0, 1.0))
-        angle = math.degrees(math.acos(cosine))
-        angles.append(angle)
-        if angle <= limit:
-            hits += 1
-
-    if not angles:
-        return {"n": 0, "available": False, "reason": "no shared frame with head pose"}
-    return {
-        "n": len(angles),
-        "available": True,
-        "share": round(hits / len(angles), 3),
-        "min_angle": round(min(angles), 1),
-        "mean_angle": round(float(np.mean(angles)), 1),
-    }
+        distance = math.hypot(hx - tx, hy - ty)
+        if best is None or distance < best[0]:
+            best = (distance, pid)
+    return best[1] if best else None
 
 
 def _looks_at(
-    samples: dict[int, dict[str, Any]], other: dict[int, dict[str, Any]]
+    looks: list[tuple[int, int | None, set[int]]], other: int
 ) -> dict[str, Any]:
-    """Share of shared frames with gaze where the look-at point lands in the other's body box."""
-    n = hits = 0
-    for frame, sample in sorted(samples.items()):
-        gaze, target = sample.get("gaze"), other.get(frame)
-        if not gaze or not target:
-            continue
-        n += 1
-        x, y = gaze["target"]
-        box = target["body"]
-        if float(gaze["in_frame"]) >= IN_FRAME and box[0] <= x <= box[2] and box[1] <= y <= box[3]:
-            hits += 1
-    if not n:
-        return {"n": 0, "available": False, "reason": "no shared frame with gaze"}
-    return {"n": n, "available": True, "share": round(hits / n, 3), "hits": hits}
+    """Share of looks landing on the other while on screen, whole and per segment."""
+    shared = [
+        (segment, landed == other)
+        for segment, landed, present in looks
+        if other in present
+    ]
+    if not shared:
+        return {
+            "n": 0,
+            "available": False,
+            "reason": "no shared frame with gaze",
+        }
+    hits = sum(hit for _, hit in shared)
+    by_segment: list[dict[str, int]] = []
+    for segment in sorted({s for s, _ in shared}):
+        mine = [hit for s, hit in shared if s == segment]
+        by_segment.append({"segment": segment, "n": len(mine), "hits": sum(mine)})
+    return {
+        "n": len(shared),
+        "available": True,
+        "share": round(hits / len(shared), 3),
+        "hits": hits,
+        "by_segment": by_segment,
+    }
 
 
 def _synchrony(
@@ -238,6 +225,22 @@ def run(cfg: Config) -> dict[str, Any]:
             for frame in rows.get(key, {}):
                 segment_of[pid][frame] = key[0]
 
+    heads: dict[int, dict[int, Head]] = {}
+    for pid, table in person_rows.items():
+        for frame, row in table.items():
+            heads.setdefault(frame, {})[pid] = _head_of(row)
+    looks: dict[int, list[tuple[int, int | None, set[int]]]] = {}
+    for pid, samples in person_series.items():
+        for frame, sample in sorted(samples.items()):
+            face = person_rows[pid].get(frame, {}).get("face")
+            if "gaze" not in sample or not face:
+                continue
+            others = {p: h for p, h in heads[frame].items() if p != pid}
+            landed = _landed(sample["gaze"], face, others)
+            looks.setdefault(pid, []).append(
+                (segment_of[pid][frame], landed, set(others))
+            )
+
     face_outside_body = sum(
         1
         for rows in person_rows.values()
@@ -246,7 +249,7 @@ def run(cfg: Config) -> dict[str, Any]:
     )
 
     relations: list[dict[str, Any]] = []
-    attention_edges = synchrony_edges = looks_at_edges = 0
+    synchrony_edges = looks_at_edges = 0
     for left, right in itertools.combinations(
         sorted(aggregated["persons"], key=lambda p: int(p["person_id"])), 2
     ):
@@ -257,16 +260,12 @@ def run(cfg: Config) -> dict[str, Any]:
             continue
 
         a_series, b_series = person_series[a_id], person_series[b_id]
-        a_to_b = _attends(a_series, a_rows, b_rows, cfg.attention_deg)
-        b_to_a = _attends(b_series, b_rows, a_rows, cfg.attention_deg)
         sync = _synchrony(a_series, b_series, cfg.sync_min)
-        a_sees_b = _looks_at(a_series, b_rows)
-        b_sees_a = _looks_at(b_series, a_rows)
+        a_sees_b = _looks_at(looks.get(a_id, []), b_id)
+        b_sees_a = _looks_at(looks.get(b_id, []), a_id)
         if a_sees_b.get("hits") or b_sees_a.get("hits"):
             looks_at_edges += 1
 
-        if a_to_b["available"] or b_to_a["available"]:
-            attention_edges += 1
         if sync["available"]:
             synchrony_edges += 1
         relations.append(
@@ -279,13 +278,6 @@ def run(cfg: Config) -> dict[str, Any]:
                     "segments": sorted({segment_of[a_id][f] for f in together}),
                 },
                 "placement": _placement(a_rows, b_rows),
-                "attention": {
-                    "a_to_b": a_to_b,
-                    "b_to_a": b_to_a,
-                    "mutual": bool(
-                        a_to_b.get("share", 0) > 0 and b_to_a.get("share", 0) > 0
-                    ),
-                },
                 "looks_at": {
                     "a_to_b": a_sees_b,
                     "b_to_a": b_sees_a,
@@ -295,7 +287,6 @@ def run(cfg: Config) -> dict[str, Any]:
             }
         )
 
-    # Text is bound to whichever people its region overlaps.
     shots: list[dict[str, Any]] = []
     for shot in aggregated["shots"]:
         index = int(shot["index"])
@@ -325,18 +316,20 @@ def run(cfg: Config) -> dict[str, Any]:
         "shot_count": len(shots),
         "person_count": len(aggregated["persons"]),
         "relation_count": len(relations),
-        "attention_edges": attention_edges,
         "synchrony_edges": synchrony_edges,
         "looks_at_edges": looks_at_edges,
         "cross_segment_relations": sum(
             1 for r in relations if len(r["co_present"]["segments"]) > 1
         ),
-        "attention_degrees": cfg.attention_deg,
+        "look_degrees": LOOK_DEG,
+        "look_in_frame": IN_FRAME,
         "synchrony_min_samples": cfg.sync_min,
         "face_outside_body": face_outside_body,
         "note": (
-            "attention is head orientation, not gaze; synchrony abstains below the sample "
-            "floor; relations are between global persons and may span segments"
+            "a look lands on the head nearest Gaze-LLE's point, of those within look_degrees of "
+            "its line of sight, when its in-frame probability reaches look_in_frame; "
+            "synchrony abstains below the sample floor; relations are between global persons "
+            "and may span segments"
         ),
         "relations": relations,
         "shots": shots,

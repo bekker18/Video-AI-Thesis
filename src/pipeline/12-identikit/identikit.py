@@ -50,11 +50,11 @@ SCALE: tuple[tuple[str, str, float], ...] = (
     ("medium", "body_height", 0.75),
     ("long", "body_height", 0.25),
 )
-GRAYSCALE = 0.01  # weighted chroma; a grey keyframe re-encoded as JPEG reads 0.0, the dullest colour clip 0.03
-PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
-WARM = 5.0  # mean b* beyond which a segment reads warm, or below its negative cool
-OUTDOOR = 0.5  # mean Places365 outdoor probability from which a segment or video reads outdoor
-# The values a person's record can show; head pose is the one under enunciative.
+GRAYSCALE = 0.01  # weighted chroma below which a segment reads grayscale
+PORTRAIT = 0.05  # median face area against the rest of the frame, for a portrait
+WARM = 5.0  # mean b* above which a segment reads warm, below its negative cool
+OUTDOOR = 0.5  # mean Places365 outdoor probability from which a segment reads outdoor
+# The values a person's record can show; head pose and gaze are under enunciative.
 MEASURED = (
     "age",
     "gender",
@@ -124,8 +124,8 @@ PROVENANCE: dict[str, str] = {
     "figurative.persons[].movement": "07 MediaPipe PoseLandmarker, via 09",
     "figurative.persons[].by_segment": "07 HSEmotion and PoseLandmarker samples split by segment, via 09",
     "enunciative.persons[].head_pose": "07 MediaPipe FaceLandmarker, via 09",
-    "enunciative.relations": "10, from 06 boxes and 07 head pose and affect",
-    "enunciative.relations[].looks_at": "10, from 07 Gaze-LLE look-at points in 06 body boxes",
+    "enunciative.relations": "10, from 06 boxes and 07 gaze and affect",
+    "enunciative.relations[].looks_at": "10, from 07 Gaze-LLE's sight line and point to heads from 06 boxes",
     "enunciative.persons[].gaze": "07 Gaze-LLE with DINOv2 ViT-B on the frame and head box, via 09",
     "enunciative.segments[].visible_at_once": "03 YOLO11 person count over keyframes",
     "enunciative.segments[].followed": "08 person ids, via 09",
@@ -135,7 +135,6 @@ PROVENANCE: dict[str, str] = {
 }
 
 CAVEATS: tuple[str, ...] = (
-    "attention is head orientation, not gaze; looks_at is gaze",
     "gaze comes from an enlarged YuNet face box and the scene: faces YuNet misses have none, and "
     "the model was trained on real video, not animation or CGI",
     "placement 'nearer' is a box-area proxy, not depth",
@@ -148,7 +147,9 @@ CAVEATS: tuple[str, ...] = (
     "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
     "a person's confidence is banded on the median samples behind their values, good from 10, "
     "moderate from 3; a glimpsed person's every value rests on one sample",
-    "relations are listed on --relation-min head-pose samples or more; attention and looks_at carry their n",
+    "a relation is listed when, in some segment, --relation-share of one person's looks on "
+    "--relation-min samples or more land on the other's head (of the heads within 20 degrees of the "
+    "line of sight, the one nearest Gaze-LLE's point)",
     "the caption is written by a VLM; `unsupported` lists objects it names that no detector found",
     "perceived_ethnicity is FairFace's reading against its own 7 groups, not a property of a person; "
     "it is read on live-action faces only, and photoreal CGI passes that gate",
@@ -261,29 +262,39 @@ def _text(
     return out
 
 
+def _peak(side: dict[str, Any], minimum: int) -> dict[str, Any] | None:
+    """A direction's best segment, on `minimum` samples or more."""
+    found = [s for s in side.get("by_segment", []) if int(s["n"]) >= minimum]
+    if not found:
+        return None
+    best = max(found, key=lambda s: (s["hits"] / s["n"], s["n"]))
+    return {
+        "segment": best["segment"],
+        "share": round(best["hits"] / best["n"], 3),
+        "n": best["n"],
+    }
+
+
 def _evidenced(relation: dict[str, Any], floor: float, minimum: int) -> bool:
-    """Listed when a head points at the other often enough over enough samples, or affect moves together."""
-    attention = relation["attention"]
+    """Listed when one segment's looks reach `floor`, or affect moves together."""
+    looks = relation["looks_at"]
+    peaks = [_peak(looks[side], minimum) for side in ("a_to_b", "b_to_a")]
     return bool(relation["synchrony"]["available"]) or any(
-        float(attention[side].get("share") or 0.0) >= floor
-        and int(attention[side].get("n", 0)) >= minimum
-        for side in ("a_to_b", "b_to_a")
+        p is not None and p["share"] >= floor for p in peaks
     )
 
 
-def _side(found: dict[str, Any]) -> dict[str, Any] | None:
-    """One direction's share with the samples behind it; null where it was not measured."""
-    return (
-        {"share": found["share"], "n": found["n"]} if found.get("available") else None
-    )
+def _side(found: dict[str, Any], minimum: int) -> dict[str, Any] | None:
+    """One direction's share, samples and best segment; null where unmeasured."""
+    if not found.get("available"):
+        return None
+    return {"share": found["share"], "n": found["n"], "peak": _peak(found, minimum)}
 
 
-def _relation(relation: dict[str, Any]) -> dict[str, Any]:
-    attention = relation["attention"]
+def _relation(relation: dict[str, Any], minimum: int) -> dict[str, Any]:
     synchrony = relation["synchrony"]
     placement = relation["placement"]
     looks = relation["looks_at"]
-    heads = attention["a_to_b"].get("available") or attention["b_to_a"].get("available")
     return {
         "pair": [relation["a"], relation["b"]],
         "co_present": {
@@ -294,16 +305,9 @@ def _relation(relation: dict[str, Any]) -> dict[str, Any]:
             k: placement[k]
             for k in ("horizontal", "vertical", "nearer", "size_ratio", "n")
         },
-        "attention": {
-            "a_to_b": _side(attention["a_to_b"]),
-            "b_to_a": _side(attention["b_to_a"]),
-            "mutual": attention["mutual"],
-        }
-        if heads
-        else None,
         "looks_at": {
-            "a_to_b": _side(looks["a_to_b"]),
-            "b_to_a": _side(looks["b_to_a"]),
+            "a_to_b": _side(looks["a_to_b"], minimum),
+            "b_to_a": _side(looks["b_to_a"], minimum),
             "mutual": looks["mutual"],
         }
         if looks["a_to_b"].get("available") or looks["b_to_a"].get("available")
@@ -422,13 +426,19 @@ def _person(
     return record, dropped
 
 
-def _samples(record: dict[str, Any], head_pose: dict[str, Any] | None) -> list[int]:
+def _samples(
+    record: dict[str, Any],
+    head_pose: dict[str, Any] | None,
+    gaze: dict[str, Any] | None,
+) -> list[int]:
     """The samples behind each value a person's record shows; empty when it shows none."""
     counts = [int(record[k]["n"]) for k in MEASURED if record[k]]
     if record["attributes"]:
         counts.append(max(int(a["n"]) for a in record["attributes"]))
     if head_pose and head_pose.get("yaw"):
         counts.append(int(head_pose["yaw"]["n"]))
+    if gaze:
+        counts.append(int(gaze["n"]))
     return counts
 
 
@@ -596,20 +606,20 @@ def run(cfg: Config) -> dict[str, Any]:
     for person in aggregated["persons"]:
         pid = int(person["person_id"])
         record, dropped = _person(person, links_of.get(pid, []), keep)
-        head_pose = _head_pose(person)
-        counts = _samples(record, head_pose)
+        head_pose, gaze = _head_pose(person), _gaze(person)
+        counts = _samples(record, head_pose, gaze)
         if not counts:
             tracked_only.append(pid)
             continue
         record["status"] = "described" if max(counts) > 1 else "glimpsed"
         record["confidence"] = _confidence(counts)
         shown.append(record)
-        if head_pose is not None:
+        if head_pose is not None or gaze is not None:
             heads.append(
                 {
                     "person_id": pid,
                     "head_pose": head_pose,
-                    "gaze": _gaze(person),
+                    "gaze": gaze,
                     "address": _counted(person.get("address"), ("share", "n")),
                 }
             )
@@ -730,9 +740,9 @@ def run(cfg: Config) -> dict[str, Any]:
     video_medium = _medium(mediums)
     subjects = _subjects(shots, lengths, cfg.subject_min)
     kept = [
-        _relation(r)
+        _relation(r, cfg.relation_min)
         for r in relations["relations"]
-        if _evidenced(r, cfg.identikit_attention, cfg.relation_min)
+        if _evidenced(r, cfg.relation_share, cfg.relation_min)
     ]
     persons = aggregated["persons"]
     whole = aggregated["whole_video"]
@@ -763,14 +773,13 @@ def run(cfg: Config) -> dict[str, Any]:
             "relations": {
                 "co_present": relations["relation_count"],
                 "with_evidence": len(kept),
-                "attention": relations["attention_edges"],
                 "mutual": sum(
-                    1 for r in relations["relations"] if r["attention"]["mutual"]
+                    1 for r in relations["relations"] if r["looks_at"]["mutual"]
                 ),
                 "looks_at": relations["looks_at_edges"],
                 "synchrony": relations["synchrony_edges"],
                 "cross_segment": relations["cross_segment_relations"],
-                "attention_floor": cfg.identikit_attention,
+                "share_floor": cfg.relation_share,
                 "relation_min": cfg.relation_min,
             },
             "text": {

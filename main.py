@@ -231,12 +231,6 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument(
-        "--attention-deg",
-        type=float,
-        default=30.0,
-        help="cone width within which a head counts as attending someone",
-    )
-    p.add_argument(
         "--sync-min",
         type=int,
         default=5,
@@ -259,16 +253,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     p.add_argument(
-        "--identikit-attention",
+        "--relation-share",
         type=float,
         default=0.5,
-        help="attention share a relation needs before the identikit lists it",
+        help="share of one's gaze samples on the other before 12 lists the relation",
     )
     p.add_argument(
         "--relation-min",
         type=int,
         default=3,
-        help="head-pose samples that attention share must rest on",
+        help="gaze samples that share must rest on",
     )
     p.add_argument(
         "--identikit-labels",
@@ -364,12 +358,11 @@ def main() -> None:
             agg_top=args.agg_top,
             pose_vis=args.pose_vis,
             address_deg=args.address_deg,
-            attention_deg=args.attention_deg,
             sync_min=args.sync_min,
             caption_model=args.caption_model,
             caption_frames=args.caption_frames,
             caption_size=args.caption_size,
-            identikit_attention=args.identikit_attention,
+            relation_share=args.relation_share,
             relation_min=args.relation_min,
             identikit_labels=args.identikit_labels,
             subject_min=args.subject_min,

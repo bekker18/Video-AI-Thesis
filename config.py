@@ -43,9 +43,7 @@ class Config:
     scenes: int  # scene labels kept per shot
 
     # 04-router
-    router_agreement: (
-        float  # soft gate: fraction of keyframes a flag must hold in; 0 = off
-    )
+    router_agreement: float  # fraction of keyframes a flag must hold in; 0 = off
 
     # 05-global-experts
     map_size: int  # longest side of every dense map written
@@ -88,7 +86,6 @@ class Config:
     address_deg: float  # head-pose cone around the camera axis for direct address
 
     # 10-relations
-    attention_deg: float  # cone width for "attends to"
     sync_min: int  # shared samples a synchrony edge needs
 
     # 11-caption
@@ -97,11 +94,11 @@ class Config:
     caption_size: int  # longest side of each keyframe given to the captioner
 
     # 12-identikit
-    identikit_attention: float  # attention share a relation needs before it is listed
-    relation_min: int  # head-pose samples that attention share must rest on
+    relation_share: float  # share of one's gaze samples on the other to list it
+    relation_min: int  # gaze samples that share must rest on
     identikit_labels: int  # labels kept per segment and per person
-    subject_min: float  # share of a segment's detection frames an animal needs to be a subject
-    object_min: float  # share of a segment's detection frames an object needs to be listed
+    subject_min: float  # share of a segment's detection frames for an animal subject
+    object_min: float  # share of a segment's detection frames to list an object
     object_frames: int  # detection frames an object needs to be listed
 
     @property

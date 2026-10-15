@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import itertools
 import json
 import math
@@ -39,11 +40,14 @@ PALETTE = (
 )
 WHITE = (255, 255, 255)
 MAGENTA = (255, 0, 255)
-ATTEND = (60, 190, 245)
+LOOKS = (60, 190, 245)
 MUTUAL = (110, 240, 130)
 SYNC = (240, 200, 90)
-FAINT = (95, 95, 95)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
+GAZE_HOLD = 8  # frames a gaze sample stays drawn, about two sample gaps
+ARROW_MIN = 3  # samples a segment's share needs for an arrow, as 12's --relation-min
+LOOK_IN_FRAME = 0.3  # as 10's IN_FRAME
+HEAD_REACH = 0.58  # as 10's
 
 # mediapipe's 33-point skeleton
 POSE_EDGES = (
@@ -168,6 +172,19 @@ def _dashed(
         p = np.asarray(a) + unit * start
         q = np.asarray(a) + unit * min(start + step, length)
         cv2.line(frame, (int(p[0]), int(p[1])), (int(q[0]), int(q[1])), colour, 2)
+
+
+def _gaze_ray(
+    frame: Array, face: list[int], gaze: dict[str, Any], colour: tuple[int, int, int]
+) -> None:
+    """Gaze-LLE's line to its point, or "out" for a look leaving the frame."""
+    if float(gaze["in_frame"]) < LOOK_IN_FRAME:
+        text = f"out {float(gaze['in_frame']):.2f}"
+        cv2.putText(frame, text, (face[0], face[3] + 14), FONT, 0.42, colour, 1)
+        return
+    target = (int(gaze["target"][0]), int(gaze["target"][1]))
+    cv2.line(frame, _centre(face), target, colour, 1, cv2.LINE_AA)
+    cv2.circle(frame, target, 7, colour, 2)
 
 
 # Detection + Tracking
@@ -373,6 +390,8 @@ def _conditional_view(root: Path) -> Draw:
                             2,
                             tipLength=0.25,
                         )
+                if "gaze" in sample:
+                    _gaze_ray(frame, row["face"], sample["gaze"], colour)
                 label = f"#{tid}"
                 if "emotion" in sample:
                     label += f" {sample['emotion']['label']}"
@@ -436,7 +455,7 @@ def _conditional_view(root: Path) -> Draw:
             frame,
             f"frame {index:5d}  shot {shot if shot is not None else '-'}  "
             + ("SAMPLE" if live else "held"),
-            "skeleton=pose  axes=head pose  magenta=OCR",
+            "skeleton=pose  axes=head pose  line+ring=gaze  magenta=OCR",
             bool(live),
         )
 
@@ -456,15 +475,54 @@ def _person_tracks(aggregated: dict[str, Any]) -> dict[int, list[tuple[int, int]
     }
 
 
+def _head_box(face: list[int]) -> list[int]:
+    """The face box grown to a head, as 07 grows it for Gaze-LLE."""
+    x1, y1, x2, y2 = face
+    w, h = x2 - x1, y2 - y1
+    return [
+        round(x1 - 0.2 * w),
+        round(y1 - 0.4 * h),
+        round(x2 + 0.2 * w),
+        round(y2 + 0.1 * h),
+    ]
+
+
+def _head_span(body: list[int]) -> tuple[int, int, int]:
+    """10's head span for someone without a face: down the body box's centre."""
+    x1, y1, x2, y2 = body
+    return (x1 + x2) // 2, y1, min(y2, y1 + round(HEAD_REACH * (x2 - x1)))
+
+
 def _relations_view(root: Path) -> Draw:
     tracks = _load(root, "tracks.json", "06-detection-tracking")
     relations = _load(root, "relations.json", "10-relations")
     aggregated = _load(root, "aggregated.json", "09-aggregation")
+    cond = _load(root, "conditional.json", "07-conditional-experts")
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
     owned = _person_tracks(aggregated)
     here_in = {
         int(s["index"]): [int(p) for p in s["person_ids"]] for s in relations["shots"]
+    }
+    gazes: dict[tuple[int, int], dict[int, dict[str, Any]]] = {
+        (int(s["index"]), int(t["track_id"])): {
+            int(x["frame"]): x["gaze"] for x in t["series"] if "gaze" in x
+        }
+        for s in cond["shots"]
+        for t in s["tracks"]
+    }
+
+    # (frame, the sample's face, gaze) per person
+    looked = {
+        pid: sorted(
+            (
+                (frame, rows[(*key, frame)]["face"], gaze)
+                for key in keys
+                for frame, gaze in gazes.get(key, {}).items()
+            ),
+            key=lambda item: item[0],
+        )
+        for pid, keys in owned.items()
     }
 
     def row_at(pid: int, index: int) -> dict[str, Any] | None:
@@ -474,35 +532,71 @@ def _relations_view(root: Path) -> Draw:
                 return found
         return None
 
+    def gaze_at(pid: int, index: int) -> tuple[list[int], dict[str, Any]] | None:
+        """The latest gaze sample and its face, at most GAZE_HOLD frames old."""
+        samples = looked.get(pid, [])
+        i = bisect.bisect_right(samples, index, key=lambda item: item[0])
+        if not i or index - samples[i - 1][0] > GAZE_HOLD:
+            return None
+        return samples[i - 1][1], samples[i - 1][2]
+
+    owner = {key: pid for pid, keys in owned.items() for key in keys}
+    faces_of: dict[int, list[tuple[int, list[int]]]] = {}
+    for (s, t, f), r in rows.items():
+        if r["face"] and (s, t) in owner:
+            faces_of.setdefault(owner[(s, t)], []).append((f, r["face"]))
+    for faces in faces_of.values():
+        faces.sort(key=lambda item: item[0])
+
+    def face_near(pid: int, index: int) -> list[int] | None:
+        """This frame's face, else the latest within GAZE_HOLD frames."""
+        faces = faces_of.get(pid, [])
+        i = bisect.bisect_right(faces, index, key=lambda item: item[0])
+        if i and index - faces[i - 1][0] <= GAZE_HOLD:
+            return faces[i - 1][1]
+        return None
+
     def anchor(pid: int, index: int) -> tuple[int, int] | None:
+        """The face near this frame, else the middle of 10's head span."""
         row = row_at(pid, index)
-        return None if row is None else _centre(row["face"] or row["body"])
+        if row is None:
+            return None
+        face = face_near(pid, index)
+        if face:
+            return _centre(face)
+        x, top, bottom = _head_span(row["body"])
+        return x, (top + bottom) // 2
+
+    def in_segment(side: dict[str, Any], segment: int) -> tuple[float, int]:
+        """10's share of looks landing on the other in this segment, and its samples."""
+        found = [s for s in side.get("by_segment", []) if s["segment"] == segment]
+        if not found:
+            return 0.0, 0
+        hits, n = found[0]["hits"], found[0]["n"]
+        return (hits / n if n >= ARROW_MIN else 0.0), n
 
     def draw(frame: Array, index: int) -> None:
         shot = shot_of.get(index)
         if shot is None:
             return
-        shown: list[tuple[dict[str, Any], float, float]] = []
+        shown: list[tuple[dict[str, Any], tuple[float, int, float, int]]] = []
 
-        # Relations are video-scoped now, so a pair is drawn wherever both are on screen.
+        # Relations are video-scoped, so a pair is drawn wherever both are on screen.
         for relation in relations["relations"]:
             a = anchor(int(relation["a"]), index)
             b = anchor(int(relation["b"]), index)
             if a is None or b is None:
                 continue
-            ab = float(relation["attention"]["a_to_b"].get("share", 0.0))
-            ba = float(relation["attention"]["b_to_a"].get("share", 0.0))
+            # Arrows follow the segment on screen, not the whole video.
+            ab, n_ab = in_segment(relation["looks_at"]["a_to_b"], shot)
+            ba, n_ba = in_segment(relation["looks_at"]["b_to_a"], shot)
             sync = relation["synchrony"]
             strong = max(ab, ba) >= 0.5
             if not strong and not sync["available"]:
                 continue
-            shown.append((relation, ab, ba))
+            shown.append((relation, (ab, n_ab, ba, n_ba)))
 
-            colour = (
-                MUTUAL
-                if relation["attention"]["mutual"]
-                else (ATTEND if strong else SYNC)
-            )
+            colour = MUTUAL if min(ab, ba) >= 0.5 else (LOOKS if strong else SYNC)
             vector = np.asarray(b, dtype=np.float64) - np.asarray(a, dtype=np.float64)
             length = max(1.0, float(np.linalg.norm(vector)))
             gap = 26.0 if length > 60 else 0.0
@@ -537,26 +631,34 @@ def _relations_view(root: Path) -> Draw:
             cv2.putText(
                 frame, f"P{pid}", (x1 + 3, y1 + 14), FONT, 0.42, (170, 170, 170), 1
             )
+            face = face_near(pid, index)
+            if face:
+                hx1, hy1, hx2, hy2 = _head_box(face)
+                cv2.rectangle(frame, (hx1, hy1), (hx2, hy2), (150, 150, 150), 1)
+            else:
+                x, top, bottom = _head_span(row["body"])
+                cv2.line(frame, (x, top), (x, bottom), (150, 150, 150), 2)
+            look = gaze_at(pid, index)
+            if look is not None:
+                _gaze_ray(frame, *look, WHITE)
 
         lines: list[tuple[str, tuple[int, int, int]]] = []
-        for relation, ab, ba in shown[:4]:
+        for relation, (ab, n_ab, ba, n_ba) in shown[:4]:
             place = relation["placement"]
             text = (
-                f"P{relation['a']}-P{relation['b']}  a->b {ab:.2f}  b->a {ba:.2f}  "
-                f"{place['horizontal']}/{place['vertical']}  nearer {place['nearer']}"
+                f"P{relation['a']}-P{relation['b']}  a->b {ab:.2f} (n {n_ab})  "
+                f"b->a {ba:.2f} (n {n_ba})  {place['horizontal']}/{place['vertical']}"
             )
             if relation["synchrony"]["available"]:
                 text += f"  sync {relation['synchrony'].get('valence')}"
-            lines.append(
-                (text, MUTUAL if relation["attention"]["mutual"] else (210, 210, 210))
-            )
+            lines.append((text, MUTUAL if min(ab, ba) >= 0.5 else (210, 210, 210)))
         _panel(frame, lines)
 
         _banner(
             frame,
             f"frame {index:5d}  shot {shot}  people here {here}  "
             f"edges drawn {len(shown)}",
-            "green=mutual  amber=attends  cyan dashed=synchrony",
+            "white=gaze point  arrows, this segment: amber=one way  green=both  cyan dashed=synchrony",
             bool(shown),
         )
 
@@ -643,7 +745,7 @@ ASPECT = PAGE_SIZE[0] / PAGE_SIZE[1]
 LINE = 1.45 / (PAGE_SIZE[1] * 72)  # figure height of one line, per point of font size
 INK, SECONDARY, MUTED = "#0b0b0b", "#52514e", "#898781"
 PAGE, SURFACE, HAIRLINE, BASELINE = "#f9f9f7", "#fcfcfb", "#e1e0d9", "#c3c2b7"
-# The reference palette's leading slots in its fixed order; both subsets used pass its validator.
+# The reference palette's leading slots, in its order.
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
 SEGMENT_FILL = "#cde2fb"
 CHECK = {
@@ -1296,9 +1398,7 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
         c.text("; ".join(notes), size=9, colour=MUTED)
 
 
-def _graph(
-    c: Column, relations: list[dict[str, Any]], floor: float, minimum: int
-) -> None:
+def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
     if not relations:
         c.text("no relation with evidence", size=9.5, colour=MUTED)
         return
@@ -1321,12 +1421,12 @@ def _graph(
         a, b = relation["pair"]
         if a not in at or b not in at:
             continue
-        attention = relation.get("attention") or {}
+        looks = relation.get("looks_at") or {}
         ab, ba = (
-            bool(side) and float(side["share"]) >= floor and int(side["n"]) >= minimum
-            for side in (attention.get("a_to_b"), attention.get("b_to_a"))
+            bool(side and side.get("peak") and side["peak"]["share"] >= floor)
+            for side in (looks.get("a_to_b"), looks.get("b_to_a"))
         )
-        # One colour per edge, the strongest evidence: mutual, then attends, then synchrony.
+        # One colour per edge, strongest first: mutual, looks at, synchrony.
         if ab and ba:
             colour, src, dst, arrow = SERIES[2], a, b, "-"
         elif ab or ba:
@@ -1362,7 +1462,7 @@ def _graph(
     ax.set_ylim(-1.35, 1.35)
     c.y -= height + 0.006
     _legend(
-        c, [(SERIES[0], "attends"), (SERIES[2], "mutual"), (SERIES[1], "synchrony")]
+        c, [(SERIES[0], "looks at"), (SERIES[2], "mutual"), (SERIES[1], "synchrony")]
     )
     if len(degree) > len(nodes):
         c.text(
@@ -1416,20 +1516,14 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     c.heading("Relations between persons")
     c.text(f"Co-present pairs {r['co_present']} · with evidence {r['with_evidence']}")
     c.text(
-        f"Attention {r['attention']} · mutual {r['mutual']} · looks at {r.get('looks_at', 0)} · "
+        f"Looks at {r['looks_at']} · mutual {r['mutual']} · "
         f"synchrony {r['synchrony']} · cross-segment {r['cross_segment']}"
     )
-    _graph(
-        c,
-        kit["enunciative"]["relations"],
-        float(r["attention_floor"]),
-        int(r["relation_min"]),
-    )
+    _graph(c, kit["enunciative"]["relations"], float(r["share_floor"]))
     c.heading("Watcher-looked system")
     persons = kit["enunciative"]["persons"]
-    c.text(
-        f"Head pose for {_count(len(persons), 'person')}, mean and sd over their samples"
-    )
+    posed = sum(1 for p in persons if p.get("head_pose"))
+    c.text(f"Head pose for {_count(posed, 'person')}, mean and sd over their samples")
     gazes = [p["gaze"] for p in persons if p.get("gaze")]
     samples = sum(int(g["n"]) for g in gazes)
     if samples:
