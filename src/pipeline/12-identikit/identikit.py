@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import statistics
 from pathlib import Path
 from typing import Any
 
@@ -19,11 +20,20 @@ EXCLUSIVE: tuple[tuple[str, ...], ...] = (
     ("a person with a moustache", "a clean-shaven person"),
     ("a person with long hair", "a person with short hair", "a bald person"),
     ("a person with curly hair", "a person with straight hair", "a bald person"),
-    ("a person with blond hair", "a person with dark hair", "a person with grey hair", "a bald person"),
+    (
+        "a person with blond hair",
+        "a person with dark hair",
+        "a person with grey hair",
+        "a bald person",
+    ),
     ("a person looking at the camera", "a person looking away"),
     ("a person looking at the camera", "a person in profile view"),
     ("a person wearing eyeglasses", "a person wearing sunglasses"),
-    ("a person wearing a hat", "a person wearing a cap", "a person wearing a headscarf"),
+    (
+        "a person wearing a hat",
+        "a person wearing a cap",
+        "a person wearing a headscarf",
+    ),
 )
 CONTRADICTS = {
     frozenset(pair) for group in EXCLUSIVE for pair in itertools.combinations(group, 2)
@@ -43,8 +53,32 @@ SCALE: tuple[tuple[str, str, float], ...] = (
 GRAYSCALE = 0.01  # weighted chroma; a grey keyframe re-encoded as JPEG reads 0.0, the dullest colour clip 0.03
 PORTRAIT = 0.05  # median face area against the rest of the frame; close-ups on the six clips sit above it
 WARM = 5.0  # mean b* beyond which a segment reads warm, or below its negative cool
+OUTDOOR = 0.5  # mean Places365 outdoor probability from which a segment or video reads outdoor
+# The values a person's record can show; head pose is the one under enunciative.
+MEASURED = (
+    "age",
+    "gender",
+    "perceived_ethnicity",
+    "emotion",
+    "valence",
+    "arousal",
+    "movement",
+)
+# On the median samples behind a person's values; first match wins, else "low".
+CONFIDENCE = ((10, "good"), (3, "moderate"))
 ANIMALS = frozenset(
-    {"bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe"}
+    {
+        "bird",
+        "cat",
+        "dog",
+        "horse",
+        "sheep",
+        "cow",
+        "elephant",
+        "bear",
+        "zebra",
+        "giraffe",
+    }
 )
 
 PENDING: dict[str, str] = {}
@@ -73,8 +107,12 @@ PROVENANCE: dict[str, str] = {
     "figurative.segments[].indoor_outdoor": "05 Places365 ResNet-18 with Places365's IO list, via 09",
     "figurative.segments[].tags": "05 MobileCLIP against RAM's tag list, via 09",
     "figurative.segments[].place": "05 Places365 ResNet-18, via 09",
-    "figurative.segments[].objects": "06 YOLO11 temporal union, via 09",
-    "figurative.segments[].text": "07 OpenCV CRNN, via 09; persons bound by 10",
+    "figurative.segments[].objects": "06 YOLO11 temporal union, via 09, against --object-min and --object-frames",
+    "figurative.segments[].text": "07 OpenCV CRNN, via 09, near-identical readings grouped; persons bound by 10",
+    "figurative.video.tags": "05 MobileCLIP against RAM's tag list, via 09, duration-weighted",
+    "figurative.video.place": "05 Places365 ResNet-18, via 09, duration-weighted",
+    "figurative.video.indoor_outdoor": "05 Places365 with Places365's IO list, via 09, duration-weighted",
+    "figurative.video.objects": "06 YOLO11 temporal union, via 09; the classes listed in some segment",
     "figurative.segments[].crowdedness": "03 YOLO11 person count over keyframes",
     "figurative.persons[].links": "08 ArcFace and YouTu ReID cosine",
     "figurative.persons[].age": "07 InsightFace genderage, via 09",
@@ -108,7 +146,9 @@ CAVEATS: tuple[str, ...] = (
     "text is read by a CRNN in ten-character chunks, so word boundaries are not real",
     "visible_at_once is the maximum over a segment's keyframes, so it is itself a lower bound",
     "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
-    "confidence is banded on time-series samples; crop-based fields carry their own n",
+    "a person's confidence is banded on the median samples behind their values, good from 10, "
+    "moderate from 3; a glimpsed person's every value rests on one sample",
+    "relations are listed on --relation-min head-pose samples or more; attention and looks_at carry their n",
     "the caption is written by a VLM; `unsupported` lists objects it names that no detector found",
     "perceived_ethnicity is FairFace's reading against its own 7 groups, not a property of a person; "
     "it is read on live-action faces only, and photoreal CGI passes that gate",
@@ -201,23 +241,41 @@ def _attributes(
 def _text(
     readings: list[dict[str, Any]], bound: list[dict[str, Any]], keep: int
 ) -> list[dict[str, Any]]:
-    """09's deduplicated readings, with the people 10 found each one overlapping."""
+    """09's grouped readings, with the people 10 found any variant of each overlapping."""
     persons: dict[str, set[int]] = {}
     for entry in bound:
         persons.setdefault(str(entry["text"]), set()).update(
             int(p) for p in entry.get("persons", [])
         )
-    return [
-        {**reading, "persons": sorted(persons.get(str(reading["text"]), set()))}
-        for reading in readings[:keep]
-    ]
+    out: list[dict[str, Any]] = []
+    for reading in readings[:keep]:
+        touching: set[int] = set()
+        for variant in reading["variants"]:
+            touching |= persons.get(str(variant), set())
+        out.append(
+            {
+                **{k: reading[k] for k in ("text", "n", "first_frame", "last_frame")},
+                "persons": sorted(touching),
+            }
+        )
+    return out
 
 
-def _evidenced(relation: dict[str, Any], floor: float) -> bool:
-    """Listed when a head points at the other often enough, or affect moves together."""
+def _evidenced(relation: dict[str, Any], floor: float, minimum: int) -> bool:
+    """Listed when a head points at the other often enough over enough samples, or affect moves together."""
     attention = relation["attention"]
-    share = max(float(attention[side].get("share") or 0.0) for side in ("a_to_b", "b_to_a"))
-    return share >= floor or bool(relation["synchrony"]["available"])
+    return bool(relation["synchrony"]["available"]) or any(
+        float(attention[side].get("share") or 0.0) >= floor
+        and int(attention[side].get("n", 0)) >= minimum
+        for side in ("a_to_b", "b_to_a")
+    )
+
+
+def _side(found: dict[str, Any]) -> dict[str, Any] | None:
+    """One direction's share with the samples behind it; null where it was not measured."""
+    return (
+        {"share": found["share"], "n": found["n"]} if found.get("available") else None
+    )
 
 
 def _relation(relation: dict[str, Any]) -> dict[str, Any]:
@@ -233,18 +291,19 @@ def _relation(relation: dict[str, Any]) -> dict[str, Any]:
             "segments": relation["co_present"]["segments"],
         },
         "placement": {
-            k: placement[k] for k in ("horizontal", "vertical", "nearer", "size_ratio", "n")
+            k: placement[k]
+            for k in ("horizontal", "vertical", "nearer", "size_ratio", "n")
         },
         "attention": {
-            "a_to_b": attention["a_to_b"].get("share"),
-            "b_to_a": attention["b_to_a"].get("share"),
+            "a_to_b": _side(attention["a_to_b"]),
+            "b_to_a": _side(attention["b_to_a"]),
             "mutual": attention["mutual"],
         }
         if heads
         else None,
         "looks_at": {
-            "a_to_b": looks["a_to_b"].get("share"),
-            "b_to_a": looks["b_to_a"].get("share"),
+            "a_to_b": _side(looks["a_to_b"]),
+            "b_to_a": _side(looks["b_to_a"]),
             "mutual": looks["mutual"],
         }
         if looks["a_to_b"].get("available") or looks["b_to_a"].get("available")
@@ -266,7 +325,9 @@ def _gaze(person: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _counted(found: dict[str, Any] | None, keys: tuple[str, ...]) -> dict[str, Any] | None:
+def _counted(
+    found: dict[str, Any] | None, keys: tuple[str, ...]
+) -> dict[str, Any] | None:
     """The named keys of a 09 block, or null when it rests on no samples."""
     if not found or not found.get("n"):
         return None
@@ -299,7 +360,9 @@ def _subjects(
     for shot, seconds in zip(shots, lengths):
         for o in shot.get("objects", []):
             if o["label"] in ANIMALS and float(o["share"]) >= floor:
-                entry = found.setdefault(o["label"], {"label": o["label"], "segments": [], "seconds": 0.0})
+                entry = found.setdefault(
+                    o["label"], {"label": o["label"], "segments": [], "seconds": 0.0}
+                )
                 entry["segments"].append(int(shot["index"]))
                 entry["seconds"] += float(o["share"]) * seconds
     return sorted(
@@ -315,7 +378,6 @@ def _person(
     gender = demographics.get("gender")
     emotion = person.get("emotion") or {}
     attributes, dropped = _attributes(person.get("attributes") or [], keep)
-    series = int(person["support"]["series"])
     record = {
         "person_id": person["person_id"],
         "segments": person["segments"],
@@ -356,9 +418,23 @@ def _person(
             for s in person.get("by_segment") or []
         ],
         "support": person["support"],
-        "confidence": "good" if series >= 10 else ("moderate" if series >= 2 else "thin"),
     }
     return record, dropped
+
+
+def _samples(record: dict[str, Any], head_pose: dict[str, Any] | None) -> list[int]:
+    """The samples behind each value a person's record shows; empty when it shows none."""
+    counts = [int(record[k]["n"]) for k in MEASURED if record[k]]
+    if record["attributes"]:
+        counts.append(max(int(a["n"]) for a in record["attributes"]))
+    if head_pose and head_pose.get("yaw"):
+        counts.append(int(head_pose["yaw"]["n"]))
+    return counts
+
+
+def _confidence(counts: list[int]) -> str:
+    middle = statistics.median(counts)
+    return next((label for floor, label in CONFIDENCE if middle >= floor), "low")
 
 
 def _head_pose(person: dict[str, Any]) -> dict[str, Any] | None:
@@ -368,7 +444,9 @@ def _head_pose(person: dict[str, Any]) -> dict[str, Any] | None:
     return {axis: _measure(pose.get(axis)) for axis in ("yaw", "pitch", "roll")}
 
 
-def _histogram(histograms: list[tuple[dict[str, list[float]], float]]) -> dict[str, Any] | None:
+def _histogram(
+    histograms: list[tuple[dict[str, list[float]], float]],
+) -> dict[str, Any] | None:
     """Segment histograms weighted by duration, like the other video-level plastic values."""
     total = sum(seconds for _, seconds in histograms)
     if not histograms or total <= 0:
@@ -409,28 +487,42 @@ def _depth(plastic: dict[str, Any]) -> dict[str, Any] | None:
             {
                 "label": t["label"],
                 "disparity": t["disparity"],
-                "ratio": round(float(t["disparity"]) / background, 3) if background else None,
+                "ratio": round(float(t["disparity"]) / background, 3)
+                if background
+                else None,
             }
             for t in things
         ],
-        "order": [t["label"] for t in sorted(things, key=lambda t: (-float(t["disparity"]), t["label"]))],
+        "order": [
+            t["label"]
+            for t in sorted(things, key=lambda t: (-float(t["disparity"]), t["label"]))
+        ],
     }
+
+
+def _io(outdoor: float) -> dict[str, Any]:
+    return {"label": "outdoor" if outdoor >= OUTDOOR else "indoor", "outdoor": outdoor}
 
 
 def _indoor_outdoor(plastic: dict[str, Any]) -> dict[str, Any] | None:
     stats = plastic.get("outdoor") or {}
     if not stats.get("n"):
         return None
-    label = "outdoor" if float(stats["mean"]) >= 0.5 else "indoor"
-    return {"label": label, "outdoor": stats["mean"], "n": stats["n"]}
+    return {**_io(float(stats["mean"])), "n": stats["n"]}
 
 
 def _framing(framing: dict[str, Any]) -> dict[str, Any]:
     """Null where nobody was followed: there is no one to frame."""
     if not framing.get("frames"):
-        return {"camera_distance": None, "face_background_ratio": None, "portrait_scene": None}
+        return {
+            "camera_distance": None,
+            "face_background_ratio": None,
+            "portrait_scene": None,
+        }
     medians = {k: float(framing[k]["median"]) for k in ("face_height", "body_height")}
-    scale = next((label for label, key, floor in SCALE if medians[key] >= floor), "extreme long")
+    scale = next(
+        (label for label, key, floor in SCALE if medians[key] >= floor), "extreme long"
+    )
     ratio = float(framing["face_background"]["median"])
     return {
         "camera_distance": {"scale": scale, **medians, "frames": framing["frames"]},
@@ -439,13 +531,17 @@ def _framing(framing: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _caption(json_dir: Path, shots: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+def _caption(
+    json_dir: Path, shots: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str]:
     """11 runs a VLM, so a missing or stale caption is a gap, not an error."""
     path = json_dir / "caption.json"
     if not path.exists():
         return None, "11-caption has not run"
     meta: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
-    if meta["segments"] != [[int(s["start_frame"]), int(s["end_frame"])] for s in shots]:
+    if meta["segments"] != [
+        [int(s["start_frame"]), int(s["end_frame"])] for s in shots
+    ]:
         return None, "caption.json was written for other segments; re-run 11-caption"
     return meta, ""
 
@@ -455,6 +551,10 @@ def run(cfg: Config) -> dict[str, Any]:
     relations = _read(cfg.json_dir, "relations.json", "10-relations")
     identity = _read(cfg.json_dir, "identity.json", "08-identity")
     profile = _read(cfg.json_dir, "profile.json", "03-profiler")
+    if "whole_video" not in aggregated:
+        raise RuntimeError(
+            "aggregated.json predates whole_video; re-run 09-aggregation"
+        )
 
     keep = cfg.identikit_labels
     pending, provenance = dict(PENDING), dict(PROVENANCE)
@@ -471,7 +571,9 @@ def run(cfg: Config) -> dict[str, Any]:
             f"11 {caption_meta['model']} on 02 keyframes, with hints from 02, 03, 05, 06, 07, 09 and 10"
         )
     shots = aggregated["shots"]
-    at_once = {int(s["index"]): int(s["counts"]["person_max"]) for s in profile["shots"]}
+    at_once = {
+        int(s["index"]): int(s["counts"]["person_max"]) for s in profile["shots"]
+    }
     bound_text = {int(s["index"]): s["text"] for s in relations["shots"]}
     links_of = {
         int(p["person_id"]): [
@@ -485,8 +587,8 @@ def run(cfg: Config) -> dict[str, Any]:
     frames = max(int(s["end_frame"]) for s in shots) + 1
     lengths = [float(s["end_time"]) - float(s["start_time"]) for s in shots]
 
-    # Described means at least one expert value reached the record.
-    described: list[dict[str, Any]] = []
+    # Described: some value rests on two samples or more. Glimpsed: values, each from one sample.
+    shown: list[dict[str, Any]] = []
     heads: list[dict[str, Any]] = []
     tracked_only: list[int] = []
     conflicts: list[dict[str, Any]] = []
@@ -495,20 +597,13 @@ def run(cfg: Config) -> dict[str, Any]:
         pid = int(person["person_id"])
         record, dropped = _person(person, links_of.get(pid, []), keep)
         head_pose = _head_pose(person)
-        measured = (
-            "age",
-            "gender",
-            "perceived_ethnicity",
-            "attributes",
-            "emotion",
-            "valence",
-            "arousal",
-            "movement",
-        )
-        if not any(record[k] for k in measured) and head_pose is None:
+        counts = _samples(record, head_pose)
+        if not counts:
             tracked_only.append(pid)
             continue
-        described.append(record)
+        record["status"] = "described" if max(counts) > 1 else "glimpsed"
+        record["confidence"] = _confidence(counts)
+        shown.append(record)
         if head_pose is not None:
             heads.append(
                 {
@@ -532,6 +627,7 @@ def run(cfg: Config) -> dict[str, Any]:
     histograms: list[tuple[dict[str, list[float]], float]] = []
     mediums: list[tuple[dict[str, float], float]] = []
     moves: dict[str, float] = {}
+    listed_objects: set[str] = set()
     for shot, seconds in zip(shots, lengths):
         index = int(shot["index"])
         plastic = shot["plastic"]
@@ -570,7 +666,10 @@ def run(cfg: Config) -> dict[str, Any]:
                 "visual": visual,
                 "coverage": {name: c["mean"] for name, c in coverage.items()},
                 "palette": [
-                    {"hex": "#{:02x}{:02x}{:02x}".format(*c["rgb"]), "share": c["share"]}
+                    {
+                        "hex": "#{:02x}{:02x}{:02x}".format(*c["rgb"]),
+                        "share": c["share"],
+                    }
                     for c in plastic.get("palette") or []
                 ],
                 "centralities": _centralities(plastic),
@@ -578,6 +677,15 @@ def run(cfg: Config) -> dict[str, Any]:
             }
         )
 
+        # A class seen in a frame or two is mostly the detector's noise: counted, not listed.
+        objects = shot.get("objects", [])
+        listed = [
+            o
+            for o in objects
+            if float(o["share"]) >= cfg.object_min
+            and int(o["frame_count"]) >= cfg.object_frames
+        ]
+        listed_objects |= {str(o["label"]) for o in listed}
         figurative_segments.append(
             {
                 "segment": index,
@@ -588,9 +696,14 @@ def run(cfg: Config) -> dict[str, Any]:
                 ],
                 "indoor_outdoor": _indoor_outdoor(plastic),
                 "objects": [
-                    {"label": o["label"], "frames": o["frame_count"], "share": o["share"]}
-                    for o in shot.get("objects", [])
+                    {
+                        "label": o["label"],
+                        "frames": o["frame_count"],
+                        "share": o["share"],
+                    }
+                    for o in listed
                 ],
+                "objects_withheld": len(objects) - len(listed),
                 "text": _text(shot["text"], bound_text.get(index, []), keep),
                 "text_readings": len(shot["text"]),
                 "crowdedness": _crowd(at_once.get(index, 0)),
@@ -605,7 +718,9 @@ def run(cfg: Config) -> dict[str, Any]:
                 "assessment": _assess(at_once.get(index, 0), followed),
                 **_framing(shot.get("framing") or {}),
                 "address": _counted(shot.get("address"), ("share", "n")),
-                "camera": {k: camera[k] for k in ("movement", "direction")} if camera else None,
+                "camera": {k: camera[k] for k in ("movement", "direction")}
+                if camera
+                else None,
             }
         )
 
@@ -617,9 +732,11 @@ def run(cfg: Config) -> dict[str, Any]:
     kept = [
         _relation(r)
         for r in relations["relations"]
-        if _evidenced(r, cfg.identikit_attention)
+        if _evidenced(r, cfg.identikit_attention, cfg.relation_min)
     ]
     persons = aggregated["persons"]
+    whole = aggregated["whole_video"]
+    video_objects = [o for o in whole["objects"] if o["label"] in listed_objects]
 
     record: dict[str, Any] = {
         "video": aggregated["video"],
@@ -637,7 +754,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "subjects": len(subjects),
             "persons": {
                 "resolved": len(persons),
-                "described": len(described),
+                "described": sum(1 for r in shown if r["status"] == "described"),
+                "glimpsed": sum(1 for r in shown if r["status"] == "glimpsed"),
                 "tracked_only": len(tracked_only),
                 "abstained": sum(1 for p in persons if p["abstained"]),
                 "thin": aggregated["thin_records"],
@@ -646,11 +764,14 @@ def run(cfg: Config) -> dict[str, Any]:
                 "co_present": relations["relation_count"],
                 "with_evidence": len(kept),
                 "attention": relations["attention_edges"],
-                "mutual": sum(1 for r in relations["relations"] if r["attention"]["mutual"]),
+                "mutual": sum(
+                    1 for r in relations["relations"] if r["attention"]["mutual"]
+                ),
                 "looks_at": relations["looks_at_edges"],
                 "synchrony": relations["synchrony_edges"],
                 "cross_segment": relations["cross_segment_relations"],
                 "attention_floor": cfg.identikit_attention,
+                "relation_min": cfg.relation_min,
             },
             "text": {
                 "readings": sum(int(t["n"]) for s in shots for t in s["text"]),
@@ -664,7 +785,9 @@ def run(cfg: Config) -> dict[str, Any]:
                 "mean_s": round(sum(lengths) / len(lengths), 3),
                 "min_s": round(min(lengths), 3),
                 "max_s": round(max(lengths), 3),
-                "shots_per_minute": round(60 * len(shots) / duration, 2) if duration else 0.0,
+                "shots_per_minute": round(60 * len(shots) / duration, 2)
+                if duration
+                else 0.0,
             },
             "presence": [
                 {
@@ -689,9 +812,18 @@ def run(cfg: Config) -> dict[str, Any]:
         },
         "figurative": {
             "caption": caption,
+            "video": {
+                "tags": whole["tags"],
+                "place": whole["place"],
+                "indoor_outdoor": _io(float(whole["outdoor"]))
+                if whole["outdoor"] is not None
+                else None,
+                "objects": video_objects,
+                "objects_withheld": len(whole["objects"]) - len(video_objects),
+            },
             "segments": figurative_segments,
             "subjects": subjects,
-            "persons": described,
+            "persons": shown,
             "tracked_only": {"count": len(tracked_only), "ids": tracked_only},
         },
         "enunciative": {
@@ -711,12 +843,19 @@ def run(cfg: Config) -> dict[str, Any]:
             "pending": pending,
             "excluded": EXCLUDED,
             "abstained": [int(p["person_id"]) for p in persons if p["abstained"]],
-            "thin": [int(p["person_id"]) for p in persons if int(p["support"]["series"]) < 2],
+            "thin": [
+                int(p["person_id"]) for p in persons if int(p["support"]["series"]) < 2
+            ],
+            "glimpsed": [
+                int(r["person_id"]) for r in shown if r["status"] == "glimpsed"
+            ],
             "segments_without_conditional_branch": [
                 int(s["index"]) for s in shots if not s["tracked"]
             ],
             "under_tracked_segments": [
-                e["segment"] for e in enunciative_segments if e["assessment"] == "under_tracked"
+                e["segment"]
+                for e in enunciative_segments
+                if e["assessment"] == "under_tracked"
             ],
             "attribute_conflicts": conflicts,
             "ethnicity_withheld": ethnicity_withheld,
@@ -733,8 +872,9 @@ def run(cfg: Config) -> dict[str, Any]:
         "reduction": round(1 - size / inputs, 3) if inputs else 0.0,
     }
 
+    # Compact: indentation doubled the file; pretty-print it to read by hand.
     (cfg.out_root / "identikit.json").write_text(
-        json.dumps(record, indent=2), encoding="utf-8"
+        json.dumps(record, separators=(",", ":")), encoding="utf-8"
     )
     return {
         "video": record["video"],

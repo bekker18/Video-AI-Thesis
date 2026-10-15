@@ -358,16 +358,17 @@ def _conditional_view(root: Path) -> Draw:
                     cx, cy = _centre(row["face"])
                     matrix = _rotation(head["yaw"], head["pitch"], head["roll"])
                     scale = max(18, (fx2 - fx1) // 2)
+                    # MediaPipe's y points up and its face along +z; the image's y points down.
                     for vector, axis in (
                         ((1, 0, 0), (0, 0, 255)),
-                        ((0, -1, 0), (0, 255, 0)),
-                        ((0, 0, -1), (255, 0, 0)),
+                        ((0, 1, 0), (0, 255, 0)),
+                        ((0, 0, 1), (255, 0, 0)),
                     ):
                         end = matrix @ np.asarray(vector, dtype=np.float64) * scale
                         cv2.arrowedLine(
                             frame,
                             (cx, cy),
-                            (int(cx + end[0]), int(cy + end[1])),
+                            (int(cx + end[0]), int(cy - end[1])),
                             axis,
                             2,
                             tipLength=0.25,
@@ -793,12 +794,13 @@ def _header(fig: Figure, kit: dict[str, Any], name: str) -> None:
     tiles = (
         ("persons resolved", p["resolved"]),
         ("described", p["described"]),
+        ("glimpsed", p["glimpsed"]),
         ("tracked only", p["tracked_only"]),
         ("abstained", p["abstained"]),
         ("thin records", p["thin"]),
     )
     for i, (label, value) in enumerate(tiles):
-        x = 0.54 + i * 0.09
+        x = 0.46 + i * 0.088
         fig.text(
             x, 0.985, str(value), fontsize=28, weight="semibold", color=INK, va="top"
         )
@@ -1169,6 +1171,9 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
         lines.append(
             f"Emotion {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']})"
         )
+    if p.get("movement"):
+        m = p["movement"]
+        lines.append(f"Body movement {m['mean']:.3f}{_sd(m, 3)} (n={m['n']})")
     yaw = (head or {}).get("yaw")
     if yaw:
         lines.append(f"Head yaw {yaw['mean']:.1f} deg{_sd(yaw)} (n={yaw['n']})")
@@ -1210,26 +1215,55 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
             colour=MUTED,
         )
 
+    # Place only video-wide: per segment Places365 is too often a confident wrong category.
+    c.heading("Whole video")
+    video = figurative["video"]
+    io = video.get("indoor_outdoor")
+    places = ", ".join(f"{p['label']} {p['score']:.2f}" for p in video["place"][:3])
+    c.text(
+        " · ".join(
+            v for v in (f"{io['label']} {io['outdoor']:.2f}" if io else "", places) if v
+        )
+        or "place unknown",
+        size=10,
+    )
+    tags = ", ".join(t["label"] for t in video["tags"][:5])
+    objects = ", ".join(o["label"] for o in video["objects"][:5])
+    c.text(
+        f"Tags: {tags or 'none'} · objects: {objects or 'none'}",
+        size=9.5,
+        colour=SECONDARY,
+    )
+    # The readings themselves are not drawn: the CRNN's ten-character chunks make up words.
+    totals = kit["summary"]["text"]
+    c.text(
+        f"Text: {totals['readings']} readings in {totals['distinct']} groups, not shown: "
+        "the OCR splits words at arbitrary points"
+        if totals["readings"]
+        else "Text: none read",
+        size=9.5,
+        colour=SECONDARY,
+    )
+
     c.heading("Per segment")
     times = {s["segment"]: s for s in kit["timeline"]["segments"]}
     segments = figurative["segments"]
-    for s in segments[:4]:
+    for s in segments[:2]:
         t = times[s["segment"]]
         io = s.get("indoor_outdoor")
-        place = s["place"][0]["label"] if s["place"] else "no place"
         where = (
             f"{io['label']} {io['outdoor']:.2f}" if io else "indoor or outdoor unknown"
         )
         c.text(
-            f"seg {s['segment']} · {t['start']:.1f}-{t['end']:.1f} s · {where} · {place} · {s['crowdedness']}",
+            f"seg {s['segment']} · {t['start']:.1f}-{t['end']:.1f} s · {where} · {s['crowdedness']}",
             size=9.5,
             weight="bold",
         )
         c.text(
             ", ".join(s["tags"]) or "no tags", size=9.5, colour=SECONDARY, indent=0.008
         )
-    if len(segments) > 4:
-        c.text(f"+{len(segments) - 4} more segments", size=9, colour=MUTED)
+    if len(segments) > 2:
+        c.text(f"+{len(segments) - 2} more segments", size=9, colour=MUTED)
 
     c.heading("Content participants")
     subjects = figurative.get("subjects") or []
@@ -1240,7 +1274,7 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
             size=10,
         )
     persons = sorted(
-        figurative["persons"],
+        (p for p in figurative["persons"] if p["status"] == "described"),
         key=lambda p: (-int(p["support"]["series"]), int(p["person_id"])),
     )
     heads = {h["person_id"]: h for h in kit["enunciative"]["persons"]}
@@ -1253,30 +1287,18 @@ def _figurative_column(fig: Figure, kit: dict[str, Any]) -> None:
         if rest
         else ""
     )
-    c.text(
-        f"{also}{'; ' if also else ''}{figurative['tracked_only']['count']} tracked but never described; "
-        f"{len(kit['gaps']['abstained'])} left unlinked",
-        size=9,
-        colour=MUTED,
-    )
-
-    c.heading("Text in video")
-    totals = kit["summary"]["text"]
-    c.text(f"{totals['readings']} readings, {totals['distinct']} distinct", size=10)
-    counts: dict[str, int] = {}
-    for s in segments:
-        for r in s["text"]:
-            counts[r["text"]] = counts.get(r["text"], 0) + int(r["n"])
-    readings = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:3]
-    if readings:
-        c.text(
-            " · ".join(f'"{text}" x{n}' for text, n in readings),
-            size=9.5,
-            colour=SECONDARY,
-        )
+    # Tracked-only and unlinked counts are in the header.
+    glimpsed = kit["summary"]["persons"]["glimpsed"]
+    notes = [also] if also else []
+    if glimpsed:
+        notes.append(f"{glimpsed} glimpsed, each value from one sample")
+    if notes:
+        c.text("; ".join(notes), size=9, colour=MUTED)
 
 
-def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
+def _graph(
+    c: Column, relations: list[dict[str, Any]], floor: float, minimum: int
+) -> None:
     if not relations:
         c.text("no relation with evidence", size=9.5, colour=MUTED)
         return
@@ -1301,15 +1323,15 @@ def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
             continue
         attention = relation.get("attention") or {}
         ab, ba = (
-            float(attention.get("a_to_b") or 0.0),
-            float(attention.get("b_to_a") or 0.0),
+            bool(side) and float(side["share"]) >= floor and int(side["n"]) >= minimum
+            for side in (attention.get("a_to_b"), attention.get("b_to_a"))
         )
         # One colour per edge, the strongest evidence: mutual, then attends, then synchrony.
-        if ab >= floor and ba >= floor:
+        if ab and ba:
             colour, src, dst, arrow = SERIES[2], a, b, "-"
-        elif ab >= floor or ba >= floor:
+        elif ab or ba:
             colour, src, dst, arrow = (
-                (SERIES[0], a, b, "-|>") if ab >= floor else (SERIES[0], b, a, "-|>")
+                (SERIES[0], a, b, "-|>") if ab else (SERIES[0], b, a, "-|>")
             )
         else:
             colour, src, dst, arrow = SERIES[1], a, b, "-"
@@ -1397,7 +1419,12 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
         f"Attention {r['attention']} · mutual {r['mutual']} · looks at {r.get('looks_at', 0)} · "
         f"synchrony {r['synchrony']} · cross-segment {r['cross_segment']}"
     )
-    _graph(c, kit["enunciative"]["relations"], float(r["attention_floor"]))
+    _graph(
+        c,
+        kit["enunciative"]["relations"],
+        float(r["attention_floor"]),
+        int(r["relation_min"]),
+    )
     c.heading("Watcher-looked system")
     persons = kit["enunciative"]["persons"]
     c.text(

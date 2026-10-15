@@ -265,6 +265,12 @@ def parse_args() -> argparse.Namespace:
         help="attention share a relation needs before the identikit lists it",
     )
     p.add_argument(
+        "--relation-min",
+        type=int,
+        default=3,
+        help="head-pose samples that attention share must rest on",
+    )
+    p.add_argument(
         "--identikit-labels",
         type=int,
         default=3,
@@ -275,6 +281,18 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.25,
         help="share of a segment's detection frames an animal needs to be a subject in 12",
+    )
+    p.add_argument(
+        "--object-min",
+        type=float,
+        default=0.1,
+        help="share of a segment's detection frames an object needs to be listed in 12",
+    )
+    p.add_argument(
+        "--object-frames",
+        type=int,
+        default=3,
+        help="detection frames an object needs to be listed in 12",
     )
     return p.parse_args()
 
@@ -352,8 +370,11 @@ def main() -> None:
             caption_frames=args.caption_frames,
             caption_size=args.caption_size,
             identikit_attention=args.identikit_attention,
+            relation_min=args.relation_min,
             identikit_labels=args.identikit_labels,
             subject_min=args.subject_min,
+            object_min=args.object_min,
+            object_frames=args.object_frames,
         )
         started = time.perf_counter()
         download_models.ensure(name)
