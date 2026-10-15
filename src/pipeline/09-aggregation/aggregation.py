@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -33,6 +34,7 @@ PALETTE = 6  # colours kept per segment
 IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the frame
 LIVE = "live action"  # the only medium perceived ethnicity is read in
 TAXONOMY = "FairFace-7"
+TEXT_SIMILAR = 0.8  # difflib ratio at which two readings are one caption read twice
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -487,21 +489,86 @@ def _things(keyframes: list[dict[str, Any]], top: int) -> dict[str, Any]:
 
 
 def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Readings deduplicated per shot, each with the frame range it was seen over."""
-    grouped: dict[str, list[int]] = {}
+    """Readings per shot, near-identical ones grouped under the most frequent: the CRNN reads
+    one caption slightly differently on every keyframe."""
+    frames: dict[str, list[int]] = {}
     for entry in entries:
-        grouped.setdefault(str(entry["text"]), []).append(int(entry["frame"]))
-    return [
-        {
-            "text": reading,
-            "n": len(frames),
-            "first_frame": min(frames),
-            "last_frame": max(frames),
-        }
-        for reading, frames in sorted(
-            grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])
+        frames.setdefault(str(entry["text"]), []).append(int(entry["frame"]))
+    groups: list[list[str]] = []
+    for reading in sorted(frames, key=lambda t: (-len(frames[t]), t)):
+        scores = [SequenceMatcher(None, g[0], reading).ratio() for g in groups]
+        best = max(range(len(groups)), key=lambda i: scores[i], default=None)
+        if best is None or scores[best] < TEXT_SIMILAR:
+            groups.append([reading])
+        else:
+            groups[best].append(reading)
+
+    out: list[dict[str, Any]] = []
+    for group in groups:
+        seen = [f for reading in group for f in frames[reading]]
+        out.append(
+            {
+                "text": group[0],
+                "n": len(seen),
+                "first_frame": min(seen),
+                "last_frame": max(seen),
+                "variants": sorted(group),
+            }
         )
-    ]
+    return sorted(out, key=lambda r: (-int(r["n"]), str(r["text"])))
+
+
+def _whole_video(shots: list[dict[str, Any]], top: int) -> dict[str, Any]:
+    """Figurative values over the whole video, each segment weighted by its length; 11 and 12 read them."""
+    tags: dict[str, float] = {}
+    regions: dict[str, float] = {}
+    places: dict[str, float] = {}
+    objects: dict[str, list[float]] = {}  # label -> detection frames, seconds present
+    outdoor: list[tuple[float, float]] = []
+    for shot in shots:
+        seconds = float(shot["end_time"]) - float(shot["start_time"])
+        plastic = shot["plastic"]
+        keyframes = max(1, int(plastic.get("n", 0)))
+        for tag in plastic.get("tags") or []:
+            tags[tag["label"]] = (
+                tags.get(tag["label"], 0.0) + seconds * int(tag["n"]) / keyframes
+            )
+        coverage = (plastic.get("semantic") or {}).get("coverage") or {}
+        for name, share in coverage.items():
+            name = str(name).strip()  # ADE20K has "bed "
+            regions[name] = regions.get(name, 0.0) + seconds * float(share["mean"])
+        # 05 keeps each keyframe's top --scenes labels, so this is a truncated distribution
+        for place in plastic.get("scene") or []:
+            places[place["label"]] = (
+                places.get(place["label"], 0.0)
+                + seconds * float(place["score"]) * int(place["n"]) / keyframes
+            )
+        if (plastic.get("outdoor") or {}).get("n"):
+            outdoor.append((float(plastic["outdoor"]["mean"]), seconds))
+        for found in shot["objects"]:
+            entry = objects.setdefault(str(found["label"]), [0.0, 0.0])
+            entry[0] += int(found["frame_count"])
+            entry[1] += seconds * float(found["share"])
+
+    total = sum(float(s["end_time"]) - float(s["start_time"]) for s in shots) or 1.0
+
+    def ranked(weights: dict[str, float], key: str) -> list[dict[str, Any]]:
+        order = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
+        return [{"label": k, key: round(v / total, 4)} for k, v in order]
+
+    lit = sum(s for _, s in outdoor)
+    return {
+        "seconds": round(total, 3),
+        "tags": ranked(tags, "share"),
+        "regions": ranked(regions, "share"),
+        "place": ranked(places, "score"),
+        "outdoor": round(sum(p * s for p, s in outdoor) / lit, 4) if lit else None,
+        # every class, by detection frames; share is of the running time
+        "objects": [
+            {"label": k, "frames": int(v[0]), "share": round(v[1] / total, 4)}
+            for k, v in sorted(objects.items(), key=lambda kv: (-kv[1][0], kv[0]))
+        ],
+    }
 
 
 def _frame_size(cfg: Config, tracks_meta: dict[str, Any]) -> tuple[int, int]:
@@ -693,10 +760,13 @@ def run(cfg: Config) -> dict[str, Any]:
         "note": (
             "records are video-scoped: one per global person from 08, over every track it was resolved from"
         ),
+        "whole_video": _whole_video(shots, cfg.agg_top),
         "persons": persons,
         "shots": shots,
     }
     (cfg.json_dir / "aggregated.json").write_text(
         json.dumps(meta, indent=2), encoding="utf-8"
     )
-    return {k: v for k, v in meta.items() if k not in {"persons", "shots"}}
+    return {
+        k: v for k, v in meta.items() if k not in {"whole_video", "persons", "shots"}
+    }

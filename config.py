@@ -98,8 +98,11 @@ class Config:
 
     # 12-identikit
     identikit_attention: float  # attention share a relation needs before it is listed
+    relation_min: int  # head-pose samples that attention share must rest on
     identikit_labels: int  # labels kept per segment and per person
     subject_min: float  # share of a segment's detection frames an animal needs to be a subject
+    object_min: float  # share of a segment's detection frames an object needs to be listed
+    object_frames: int  # detection frames an object needs to be listed
 
     @property
     def json_dir(self) -> Path:

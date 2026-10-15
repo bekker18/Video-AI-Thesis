@@ -104,37 +104,26 @@ def _hints(
     relations: dict[str, Any],
     cfg: Config,
 ) -> str:
-    """The whole video in seven lines, each weighted by how long its segments last."""
+    """The whole video in seven lines: tags, regions and objects from 09's whole_video, the
+    rest weighted by how long its segments last."""
     shots = aggregated["shots"]
-    floor = cfg.identikit_attention
+    video = aggregated["whole_video"]
+    floor, minimum = cfg.identikit_attention, cfg.relation_min
     mediums: dict[str, float] = {}
-    tags: dict[str, float] = {}
-    regions: dict[str, float] = {}
-    objects: dict[str, float] = {}
     animals: dict[str, float] = {}
     moves: dict[str, float] = {}
     with_people = 0.0
     for shot in shots:
         seconds = float(shot["end_time"]) - float(shot["start_time"])
         plastic = shot["plastic"]
-        keyframes = max(1, int(plastic.get("n", 0)))
-        for tag in plastic.get("tags") or []:
-            tags[tag["label"]] = (
-                tags.get(tag["label"], 0.0) + seconds * int(tag["n"]) / keyframes
-            )
-        coverage = (plastic.get("semantic") or {}).get("coverage") or {}
-        for name, share in coverage.items():
-            name = str(name).strip()  # ADE20K has "bed "
-            regions[name] = regions.get(name, 0.0) + seconds * float(share["mean"])
         for name, p in (
             (plastic.get("medium") or {}).get("distribution") or {}
         ).items():
             mediums[name] = mediums.get(name, 0.0) + seconds * float(p)
         for found in shot["objects"]:
             label = found["label"]
-            if label not in ANIMALS:
-                objects[label] = objects.get(label, 0.0) + int(found["frame_count"])
-            elif float(found["share"]) >= cfg.subject_min:  # as 12's subjects
+            if label in ANIMALS and float(found["share"]) >= cfg.subject_min:
+                # as 12's subjects
                 animals[label] = animals.get(label, 0.0) + seconds * float(
                     found["share"]
                 )
@@ -152,9 +141,12 @@ def _hints(
         )
         visible = f"up to {at_once} visible at once" if at_once > 1 else "one at a time"
         people = f"{visible}, on screen for {presence}"
+        # a direction counts on --relation-min samples or more, as 12 lists relations
         shares = [
             [
                 float(r["attention"][side].get("share") or 0.0)
+                if int(r["attention"][side].get("n", 0)) >= minimum
+                else 0.0
                 for side in ("a_to_b", "b_to_a")
             ]
             for r in relations["relations"]
@@ -179,12 +171,16 @@ def _hints(
     else:
         people = "none"
 
+    tags = [t["label"] for t in video["tags"][:TOP]]
+    regions = [r["label"] for r in video["regions"][:TOP]]
+    # by detection frames; animals have their own line
+    objects = [o["label"] for o in video["objects"] if o["label"] not in ANIMALS][:TOP]
     return "\n".join(
         [
             f"Medium: {', '.join(_ranked(mediums)[:1]) or 'unknown'}",
-            f"Scene tags: {', '.join(_ranked(tags)) or 'none'}",
-            f"Main regions: {', '.join(_ranked(regions)) or 'none'}",
-            f"Objects detected: {', '.join(_ranked(objects)) or 'none'}",
+            f"Scene tags: {', '.join(tags) or 'none'}",
+            f"Main regions: {', '.join(regions) or 'none'}",
+            f"Objects detected: {', '.join(objects) or 'none'}",
             f"Animals: {', '.join(_ranked(animals)) or 'none'}",
             f"People: {people}",
             f"Camera movement: {', '.join(_ranked(moves)) or 'unknown'}",
@@ -318,6 +314,10 @@ def run(cfg: Config) -> dict[str, Any]:
     global_meta = _read(cfg.json_dir, "global.json", "05-global-experts")
     aggregated = _read(cfg.json_dir, "aggregated.json", "09-aggregation")
     relations = _read(cfg.json_dir, "relations.json", "10-relations")
+    if "whole_video" not in aggregated:
+        raise RuntimeError(
+            "aggregated.json predates whole_video; re-run 09-aggregation"
+        )
 
     frames = _pick(segmentation["shots"], cfg.caption_frames)
     hints = _hints(aggregated, profile, relations, cfg)
