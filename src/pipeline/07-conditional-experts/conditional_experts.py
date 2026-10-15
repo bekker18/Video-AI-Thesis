@@ -71,6 +71,7 @@ FAIRFACE_AGES = (
 )
 FAIRFACE_BATCH = 32
 CLIP_BATCH = 32
+GAZE_GRID = 32  # Gaze-LLE's 448 input over DINOv2's 14-pixel patches
 
 # insightface's 5-point template for a 112x112 aligned face.
 ARCFACE_TEMPLATE = np.array(
@@ -564,6 +565,12 @@ def _head_box(
     )
 
 
+def _readable(box: tuple[float, float, float, float]) -> bool:
+    """A head under one cell of Gaze-LLE's grid rounds to no head at all."""
+    left, top, right, bottom = (round(v * GAZE_GRID) for v in box)
+    return right > left and bottom > top
+
+
 def _gaze_pass(
     gaze: tuple[Any, Any], image: Array, faces: list[list[int]], device: str
 ) -> list[dict[str, Any]]:
@@ -652,8 +659,7 @@ def run(cfg: Config) -> dict[str, Any]:
     emotion = _session(model_dir / EMOTION_MODEL) if want_face else None
     gaze = _gaze_model(device) if want_face and schedule else None
 
-    # Pose runs in the pool and emotion in batches after the loop; their keys are reserved
-    # as each sample is made, so every sample keeps the field order it always had.
+    # Pose and emotion fill keys reserved here, so every sample keeps its field order.
     observed: list[tuple[tuple[int, int], dict[str, Any]]] = []
     feelings: list[tuple[dict[str, Any], Array]] = []
     bodies: list[tuple[dict[str, Any], Future[dict[str, Any] | None]]] = []
@@ -682,6 +688,9 @@ def run(cfg: Config) -> dict[str, Any]:
                             if emotion is not None:
                                 sample["emotion"] = None
                                 feelings.append((sample, crop.copy()))
+                        # Gaze needs no mesh, only a head box
+                        height, width = image.shape[:2]
+                        if _readable(_head_box(row["face"], width, height)):
                             looking.append((sample, row["face"]))
 
                     if "body" in experts and poses is not None:
