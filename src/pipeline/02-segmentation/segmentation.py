@@ -1,11 +1,9 @@
-﻿"""02-segmentation: shots with OmniShotCut, keyframes with MobileCLIP, camera movement per shot."""
+﻿"""02-segmentation: shots with OmniShotCut, keyframes with MobileCLIP."""
 
 from __future__ import annotations
 
 import json
-import math
 import shutil
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -24,14 +22,6 @@ BATCH = 128
 DUPLICATE = 0.98  # cosine above this counts as the same picture
 SHARP_POOL = (
     0.25  # fraction of the most representative frames to pick the sharpest from
-)
-CORNERS = 200  # tracked per frame pair for camera motion
-MIN_POINTS = 10  # tracked corners a motion estimate needs
-STILL = (
-    0.05  # net pan, tilt or log zoom over a shot below which the camera did not move
-)
-SHAKE = (
-    0.004  # per-frame translation spread, as a share of width, that reads as handheld
 )
 
 
@@ -86,52 +76,6 @@ def _sharpness(gray: Array) -> float:
     return float(cv2.Laplacian(gray, cv2.CV_32F).var())
 
 
-def _motion(before: Array, after: Array) -> tuple[float, float, float] | None:
-    """LK flow on corners, then a RANSAC similarity: translation as a share of width, log scale."""
-    points = cv2.goodFeaturesToTrack(before, CORNERS, 0.01, 8)
-    if points is None or len(points) < MIN_POINTS:
-        return None
-    moved, status, _ = cv2.calcOpticalFlowPyrLK(before, after, points, np.empty(0))
-    good = status.ravel() == 1
-    if int(good.sum()) < MIN_POINTS:
-        return None
-    matrix, _ = cv2.estimateAffinePartial2D(
-        points[good], moved[good], method=cv2.RANSAC
-    )
-    if matrix is None:
-        return None
-    width = before.shape[1]
-    scale = math.hypot(float(matrix[0, 0]), float(matrix[1, 0]))
-    return float(matrix[0, 2]) / width, float(matrix[1, 2]) / width, math.log(scale)
-
-
-def _camera(steps: list[tuple[float, float, float] | None]) -> dict[str, Any]:
-    """Net pan, tilt and zoom over a shot; directions are the camera's, opposite to the content's."""
-    known = [s for s in steps if s is not None]
-    if len(known) < 2:
-        return {"movement": "unknown", "direction": None, "pairs": len(known)}
-    tx, ty, scale = (np.asarray(v) for v in zip(*known))
-    pan, tilt, zoom = float(tx.sum()), float(ty.sum()), float(scale.sum())
-    jitter = float(tx.std() + ty.std())
-    if max(abs(pan), abs(tilt)) < STILL and abs(zoom) < STILL:
-        movement, direction = ("handheld" if jitter > SHAKE else "static"), None
-    elif abs(zoom) >= max(abs(pan), abs(tilt)):
-        movement, direction = "zoom", ("in" if zoom > 0 else "out")
-    elif abs(pan) >= abs(tilt):
-        movement, direction = "pan", ("right" if pan < 0 else "left")
-    else:
-        movement, direction = "tilt", ("down" if tilt < 0 else "up")
-    return {
-        "movement": movement,
-        "direction": direction,
-        "pan": round(pan, 4),
-        "tilt": round(tilt, 4),
-        "zoom": round(zoom, 4),
-        "jitter": round(jitter, 4),
-        "pairs": len(known),
-    }
-
-
 def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
     """Crop size and normalisation from open_clip's transform, to redo it in OpenCV."""
     crop, mean, std = 256, [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]
@@ -146,8 +90,8 @@ def _preprocess_spec(preprocess: Any) -> tuple[int, list[float], list[float]]:
 
 def _scan(
     video: Path, device: str, cache_dir: Path, shot_size: tuple[int, int]
-) -> tuple[Array, Array, Array, list[tuple[float, float, float] | None], float]:
-    """One decode pass feeding OmniShotCut, MobileCLIP, sharpness and camera motion; no full frames kept."""
+) -> tuple[Array, Array, Array, float]:
+    """One decode pass feeding OmniShotCut, MobileCLIP and sharpness; no full frames kept."""
     import open_clip
     import torch
 
@@ -168,10 +112,6 @@ def _scan(
     shot_frames: list[Array] = []
     vectors: list[Array] = []
     sharp: list[float] = []
-    # frame i to i + 1, on a thread beside the decode loop: OpenCV releases the GIL
-    motions: list[Future[tuple[float, float, float] | None]] = []
-    background = ThreadPoolExecutor(1)
-    previous: Array | None = None
     batch: list[Array] = []
 
     def flush() -> None:
@@ -213,17 +153,12 @@ def _scan(
                 cv2.COLOR_BGR2RGB,
             )
         )
-        gray = cv2.cvtColor(mid, cv2.COLOR_BGR2GRAY)
-        sharp.append(_sharpness(gray))
-        if previous is not None:
-            motions.append(background.submit(_motion, previous, gray))
-        previous = gray
+        sharp.append(_sharpness(cv2.cvtColor(mid, cv2.COLOR_BGR2GRAY)))
 
         if len(batch) == BATCH:
             flush()
     flush()
     capture.release()
-    background.shutdown()
 
     if not shot_frames:
         raise RuntimeError(f"decoded no frames from {video}")
@@ -232,7 +167,6 @@ def _scan(
         np.asarray(shot_frames, dtype=np.uint8),
         np.concatenate(vectors),
         np.asarray(sharp),
-        [m.result() for m in motions],
         fps,
     )
 
@@ -299,7 +233,7 @@ def run(cfg: Config) -> dict[str, Any]:
     device = _device(cfg.device)
     shot_model, shot_size = _load_shot_model(cfg.model_dir / SHOT_CKPT)
 
-    shot_frames, embeddings, sharp, motions, fps = _scan(
+    shot_frames, embeddings, sharp, fps = _scan(
         cfg.video, device, cfg.model_dir, shot_size
     )
     frame_count = len(shot_frames)
@@ -344,7 +278,6 @@ def run(cfg: Config) -> dict[str, Any]:
             "end_time": round((end + 1) / fps, 3),
             "first_frame": f"{shots_dir.name}/{first.name}",
             "keyframes": keyframes,
-            "camera": _camera(motions[start:end]),  # pairs inside the shot only
         }
         if index < len(intra):
             shot["intra_label"] = intra[index]
@@ -364,7 +297,6 @@ def run(cfg: Config) -> dict[str, Any]:
         "shot_overlap": cfg.shot_overlap,
         "shot_model": SHOT_REPO,
         "embed_model": CLIP_MODEL,
-        "camera_model": "LK flow on corners, RANSAC similarity",
         "device": device,
         "shots": shots,
     }
