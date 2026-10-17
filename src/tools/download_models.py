@@ -1,4 +1,4 @@
-"""Downloads model weights into models/<stage>/, reusing what is there. Standalone: python3 download_models.py [stage ...]"""
+"""Downloads model weights into models/<stage>/, reusing what is there. Standalone: python3 -m src.tools.download_models [stage ...]"""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 
 OPENCV_ZOO = "https://github.com/opencv/opencv_zoo/raw/main/models"
 ULTRALYTICS = "https://github.com/ultralytics/assets/releases/download/v8.3.0"

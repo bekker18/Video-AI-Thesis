@@ -1,4 +1,4 @@
-"""Renders 06, 07, 08 and 10 over the source video and draws 12's identikit as a page: preview.py messi [--views ...]"""
+"""Renders 06, 07, 08 and 10 over the source video and draws 12's identikit as a page: python3 -m src.tools.preview messi [--views ...]"""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from config import JSON_DIR, PREVIEWS_DIR
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 Draw: TypeAlias = Callable[[Array, int], None]
 

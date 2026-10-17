@@ -9,7 +9,7 @@ from typing import Any, TypeAlias
 import cv2
 import numpy as np
 
-import download_models
+from src.tools import download_models
 from config import Config
 
 STAGE = "03-profiler"

@@ -30,7 +30,7 @@ dependencies = [
     "onnxruntime>=1.17,<2",
     "scikit-learn==1.6.1",  # only because Gaze-LLE's utils import it at load
 
-    # preview.py
+    # src/tools/preview.py
     "matplotlib==3.10.9",
 ]
 

@@ -1,4 +1,4 @@
-"""Downloads AVE's labels and a seeded sample of its scenes into data/raw/ave/: python3 download_ave.py [--count 200]"""
+"""Downloads AVE's labels and a seeded sample of its scenes into data/raw/ave/: python3 -m src.tools.download_ave [--count 200]"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "raw" / "ave"
 
 LABELS = (
