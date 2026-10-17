@@ -1,4 +1,5 @@
-"""Renders 06, 07, 08 and 10 over the source video and draws 12's identikit as a page: python3 -m src.tools.preview messi [--views ...]"""
+"""Renders 06, 07, 08 and 10 over the source video, draws 12's identikit as a page, and on request a
+video's nearest and farthest by the similarity score: python3 -m src.tools.preview messi [--views ...]"""
 
 from __future__ import annotations
 
@@ -1574,6 +1575,234 @@ def _identikit_page(root: Path, out_path: Path) -> None:
     fig.savefig(out_path, facecolor=PAGE)
 
 
+# Similarity page, after FRESCO's Figure 11: the reference, then for each score its nearest,
+# median and farthest videos in the collection src.score.similarity compared.
+
+SIMILARITY_VIEW = "similarity"
+SCORE_REPORT = ROOT / "data" / "score" / "similarity.json"
+RANKED = 8  # videos per block, as in the figure
+SCOPES = (
+    ("overall", "Overall score"),
+    ("plastic", "Plastic score"),
+    ("figurative", "Figurative score"),
+    ("enunciative", "Enunciative score"),
+)
+BLOCKS = ("Top 8: most similar", "Median 8", "Last 8: least similar")
+STRIP = 6  # the reference's keyframes over time
+THUMB_WIDTH = 360  # pixels a keyframe is reduced to before drawing
+
+
+def _keyframes(root: Path) -> tuple[list[Path], Array | None]:
+    """Keyframe paths in time order, with their 02 embeddings when present."""
+    path = root / JSON_DIR / "segmentation.json"
+    if not path.exists():
+        return [], None
+    shots = json.loads(path.read_text(encoding="utf-8"))["shots"]
+    paths = [root / k["path"] for s in shots for k in s["keyframes"]]
+    vectors = root / "embeddings" / "keyframe_embeddings.npy"
+    return paths, np.load(vectors) if vectors.exists() else None
+
+
+def _picture(path: Path) -> Array | None:
+    image = cv2.imread(str(path))
+    if image is None:
+        return None
+    height, width = image.shape[:2]
+    small = cv2.resize(
+        image,
+        (THUMB_WIDTH, max(1, round(height * THUMB_WIDTH / width))),
+        interpolation=cv2.INTER_AREA,
+    )
+    out: Array = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
+    return out
+
+
+def _typical_frame(root: Path) -> Array | None:
+    """The keyframe whose embedding is nearest the video's mean: its most typical picture."""
+    paths, vectors = _keyframes(root)
+    if not paths:
+        return None
+    pick = len(paths) // 2
+    if vectors is not None and len(vectors) == len(paths):
+        mean = vectors.mean(axis=0)
+        pick = int(np.argmax(vectors @ (mean / (np.linalg.norm(mean) or 1.0))))
+    return _picture(paths[pick])
+
+
+def _thumb(
+    fig: Figure, rect: tuple[float, float, float, float], image: Array | None
+) -> None:
+    ax = fig.add_axes(rect)
+    _bare(ax)
+    ax.set_anchor("C")
+    if image is None:
+        ax.set_facecolor(HAIRLINE)
+        ax.text(
+            0.5, 0.5, "no keyframe", ha="center", va="center", fontsize=8, color=MUTED
+        )
+    else:
+        ax.imshow(image)
+
+
+def _ranked(row: list[float | None], me: int) -> list[tuple[int, float]]:
+    """Every other measured video, nearest first."""
+    found = [(j, float(d)) for j, d in enumerate(row) if j != me and d is not None]
+    return sorted(found, key=lambda jd: (jd[1], jd[0]))
+
+
+def _reference(fig: Figure, root: Path, name: str, report: dict[str, Any]) -> None:
+    c = _box(fig, (0.015, 0.03, 0.165, 0.875), "Reference")
+    height = 0.2
+    _thumb(fig, (c.x, c.y - height, c.width, height), _typical_frame(root))
+    c.y -= height + 0.01
+    c.text(name, size=12.5, weight="bold")
+    kit_path = root / "identikit.json"
+    if kit_path.exists():
+        kit = json.loads(kit_path.read_text(encoding="utf-8"))
+        s = kit["summary"]
+        c.text(
+            f"{s['duration_s']:.1f} s · {_count(s['segments'], 'segment')} · {s.get('medium') or 'medium unknown'}",
+            size=10,
+            colour=SECONDARY,
+        )
+        p = s["persons"]
+        c.text(
+            f"{p['described']} persons described, {p['resolved']} resolved",
+            size=10,
+            colour=SECONDARY,
+        )
+        caption = (kit["figurative"].get("caption") or {}).get("text")
+        if caption:
+            c.y -= 0.006
+            c.text(f'"{caption}"', size=10)
+    c.y -= 0.012
+    c.text("Keyframes over time", size=10, colour=MUTED)
+    paths, _ = _keyframes(root)
+    chosen = (
+        [
+            paths[int(i)]
+            for i in np.linspace(0, len(paths) - 1, min(STRIP, len(paths))).round()
+        ]
+        if paths
+        else []
+    )
+    cell_w, cell_h = (c.width - 0.006) / 2, 0.085
+    for i, path in enumerate(chosen):
+        x = c.x + (i % 2) * (cell_w + 0.006)
+        y = c.y - (i // 2 + 1) * (cell_h + 0.006)
+        if y < c.floor:
+            break
+        _thumb(fig, (x, y, cell_w, cell_h), _picture(path))
+    c.y -= math.ceil(len(chosen) / 2) * (cell_h + 0.006) + 0.01
+    c.text(
+        f"Compared with {len(report['videos']) - 1} videos, calibration {report['calibration']}. "
+        "Distances run from 0, the same, to 1.",
+        size=9,
+        colour=MUTED,
+    )
+
+
+def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
+    if not report_path.exists():
+        sys.exit(f"missing {report_path}; run python3 -m src.score.similarity first")
+    report: dict[str, Any] = json.loads(report_path.read_text(encoding="utf-8"))
+    names: list[str] = report["videos"]
+    if root.name not in names:
+        sys.exit(f"{root.name} is not in {report_path}; rerun the score with it")
+    me = names.index(root.name)
+    processed = root.parent
+
+    fig = Figure(figsize=PAGE_SIZE, dpi=100, facecolor=PAGE)
+    fig.text(
+        0.018,
+        0.988,
+        "Video similarity",
+        fontsize=26,
+        weight="bold",
+        color=INK,
+        va="top",
+    )
+    fig.text(
+        0.018,
+        0.95,
+        f"{root.name} against the collection, nearest to farthest by each level of the score, "
+        "after FRESCO's Figure 11 (Morra et al., CVIU 2024)",
+        fontsize=13,
+        color=SECONDARY,
+        va="top",
+    )
+    _reference(fig, root, root.name, report)
+
+    left, right, top, bottom = 0.2, 0.985, 0.895, 0.03
+    gap, label_h = 0.008, 0.017
+    block_w = (right - left - 2 * gap) / 3
+    cell_w = block_w / 4
+    row_h = (top - bottom - 0.035) / len(SCOPES)
+    cell_h = (row_h - 0.014) / 2 - label_h
+    for b, title in enumerate(BLOCKS):
+        fig.text(
+            left + b * (block_w + gap) + block_w / 2,
+            top,
+            title,
+            ha="center",
+            va="top",
+            fontsize=15,
+            weight="bold",
+            color=INK,
+        )
+
+    stills: dict[str, Array | None] = {}
+    for r, (scope, label) in enumerate(SCOPES):
+        y_top = top - 0.035 - r * row_h
+        fig.text(
+            left - 0.008,
+            y_top - row_h / 2,
+            label,
+            rotation=90,
+            ha="right",
+            va="center",
+            fontsize=12.5,
+            weight="bold",
+            color=INK,
+        )
+        ranked = _ranked(report["distance"][scope][me], me)
+        start = max(0, (len(ranked) - RANKED) // 2)
+        blocks = (ranked[:RANKED], ranked[start : start + RANKED], ranked[-RANKED:])
+        for b, block in enumerate(blocks):
+            x0 = left + b * (block_w + gap)
+            fig.add_artist(
+                FancyBboxPatch(
+                    (x0, y_top - row_h + 0.008),
+                    block_w,
+                    row_h - 0.008,
+                    boxstyle="round,pad=0,rounding_size=0.006",
+                    mutation_aspect=ASPECT,
+                    transform=fig.transFigure,
+                    facecolor=SURFACE,
+                    edgecolor=HAIRLINE,
+                    linewidth=1,
+                    zorder=-1,
+                )
+            )
+            for i, (j, distance) in enumerate(block):
+                other = names[j]
+                if other not in stills:
+                    stills[other] = _typical_frame(processed / other)
+                x = x0 + (i % 4) * cell_w + 0.003
+                y = y_top - 0.004 - (i // 4 + 1) * (cell_h + label_h)
+                _thumb(fig, (x, y + label_h, cell_w - 0.006, cell_h), stills[other])
+                fig.text(
+                    x + (cell_w - 0.006) / 2,
+                    y + label_h - 0.002,
+                    f"{other[:12]} · {distance:.2f}",
+                    ha="center",
+                    va="top",
+                    fontsize=8,
+                    color=SECONDARY,
+                )
+    fig.savefig(out_path, facecolor=PAGE)
+
+
 VIEWS: dict[str, tuple[Callable[[Path], Draw], str]] = {
     "tracks": (_tracks_view, "06-detection-tracking"),
     "conditional": (_conditional_view, "07-conditional-experts"),
@@ -1613,7 +1842,16 @@ def main() -> None:
     )
     p.add_argument("video", help="video name under data/processed/, e.g. messi")
     views = sorted([*VIEWS, PAGE_VIEW])
-    p.add_argument("--views", nargs="+", choices=views, default=views)
+    p.add_argument(
+        "--views",
+        nargs="+",
+        choices=[*views, SIMILARITY_VIEW],
+        default=views,
+        help=f"{SIMILARITY_VIEW} is drawn only when asked: it needs src.score.similarity's report",
+    )
+    p.add_argument(
+        "--score", type=Path, default=SCORE_REPORT, help="the similarity report"
+    )
     args = p.parse_args()
 
     root = ROOT / "data" / "processed" / args.video
@@ -1627,6 +1865,11 @@ def main() -> None:
             out_path = previews / "identikit.png"
             _identikit_page(root, out_path)
             print(f"{args.video} {name}: page -> {out_path}  (12-identikit)")
+            continue
+        if name == SIMILARITY_VIEW:
+            out_path = previews / "similarity.png"
+            _similarity_page(root, out_path, args.score)
+            print(f"{args.video} {name}: page -> {out_path}  ({args.score.name})")
             continue
         source = ROOT / str(
             _load(root, "segmentation.json", "02-segmentation")["video"]
