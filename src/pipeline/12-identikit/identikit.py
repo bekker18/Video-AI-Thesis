@@ -103,7 +103,7 @@ PROVENANCE: dict[str, str] = {
     "figurative.persons[].demographic_check": "07 InsightFace genderage against FairFace, via 09",
     "enunciative.persons[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
     "enunciative.segments[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
-    "enunciative.segments[].camera": "02 LK flow on corners and a RANSAC similarity, via 09",
+    "enunciative.segments[].camera": "09 LK flow on corners off 06's person boxes, a RANSAC similarity per frame pair",
     "figurative.segments[].indoor_outdoor": "05 Places365 ResNet-18 with Places365's IO list, via 09",
     "figurative.segments[].tags": "05 MobileCLIP against RAM's tag list, via 09",
     "figurative.segments[].place": "05 Places365 ResNet-18, via 09",
@@ -155,7 +155,8 @@ CAVEATS: tuple[str, ...] = (
     "it is read on live-action faces only, and photoreal CGI passes that gate",
     "medium separates 2D animation well; photoreal CGI reads as live action",
     "address is the head turned to the lens with the gaze off the frame, not a measured eye contact",
-    "camera movement is one global similarity per frame pair: a large moving subject can read as a pan",
+    "camera movement is one similarity per frame pair fitted off detected people, so an animal or "
+    "object filling the frame can still read as a pan; its thresholds were tuned on AVE's 24 fps films",
     "temperature is the keyframes' mean colour, so grading counts as much as light",
     "subjects are animal classes the detector saw often enough, neither tracked nor told apart",
 )
@@ -336,6 +337,11 @@ def _counted(
     if not found or not found.get("n"):
         return None
     return {k: found[k] for k in keys}
+
+
+def _shares(seconds: dict[str, float], duration: float) -> dict[str, float]:
+    ranked = sorted(seconds.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {k: round(v / duration, 3) for k, v in ranked} if duration else {}
 
 
 def _temperature(warmth: float | None) -> str | None:
@@ -637,6 +643,7 @@ def run(cfg: Config) -> dict[str, Any]:
     histograms: list[tuple[dict[str, list[float]], float]] = []
     mediums: list[tuple[dict[str, float], float]] = []
     moves: dict[str, float] = {}
+    turns: dict[str, float] = {}
     listed_objects: set[str] = set()
     for shot, seconds in zip(shots, lengths):
         index = int(shot["index"])
@@ -667,6 +674,8 @@ def run(cfg: Config) -> dict[str, Any]:
         camera = shot.get("camera") or {}
         if camera.get("movement"):
             moves[camera["movement"]] = moves.get(camera["movement"], 0.0) + seconds
+        if camera.get("move"):
+            turns[camera["move"]] = turns.get(camera["move"], 0.0) + seconds
         coverage = ((plastic.get("semantic") or {}).get("coverage")) or {}
         plastic_segments.append(
             {
@@ -728,7 +737,9 @@ def run(cfg: Config) -> dict[str, Any]:
                 "assessment": _assess(at_once.get(index, 0), followed),
                 **_framing(shot.get("framing") or {}),
                 "address": _counted(shot.get("address"), ("share", "n")),
-                "camera": {k: camera[k] for k in ("movement", "direction")}
+                "camera": {
+                    k: camera.get(k) for k in ("movement", "rig", "move", "direction")
+                }
                 if camera
                 else None,
             }
@@ -839,13 +850,9 @@ def run(cfg: Config) -> dict[str, Any]:
             "persons": heads,
             "relations": kept,
             "segments": enunciative_segments,
-            # share of running time per camera movement
-            "camera": {
-                k: round(v / duration, 3)
-                for k, v in sorted(moves.items(), key=lambda kv: (-kv[1], kv[0]))
-            }
-            if duration
-            else {},
+            # shares of running time: one label per segment, and the move whatever the rig
+            "camera": _shares(moves, duration),
+            "camera_moves": _shares(turns, duration),
         },
         "provenance": provenance,
         "gaps": {
