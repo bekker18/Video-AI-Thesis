@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 from collections import Counter
+from concurrent.futures import Future, ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, TypeAlias
@@ -35,6 +37,14 @@ IN_FRAME = 0.5  # Gaze-LLE probability at which a look counts as inside the fram
 LIVE = "live action"  # the only medium perceived ethnicity is read in
 TAXONOMY = "FairFace-7"
 TEXT_SIMILAR = 0.8  # difflib ratio at which two readings are one caption read twice
+MOTION_SIDE = 256  # short side camera motion is measured at
+CORNERS = 200  # tracked per frame pair for camera motion
+MIN_POINTS = 10  # tracked corners a motion estimate needs
+MOTION_THREADS = 4  # frame pairs fitted at once; OpenCV releases the GIL
+SHAKE = 0.00058  # spread of the frame centre's shift per frame, in widths; tuned on AVE
+STILL = 0.0094  # net pan or tilt (widths) or log zoom per second; tuned on AVE
+
+Motion: TypeAlias = tuple[float, float, float]  # pan, tilt, log zoom of one frame pair
 
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
@@ -620,6 +630,120 @@ def _framing(shot: dict[str, Any], size: tuple[int, int]) -> dict[str, Any]:
     }
 
 
+def _motion(before: Array, after: Array, mask: Array | None) -> Motion | None:
+    """LK flow on corners, then a RANSAC similarity: the frame centre's shift, log scale."""
+    points = cv2.goodFeaturesToTrack(before, CORNERS, 0.01, 8, mask=mask)
+    if points is None or len(points) < MIN_POINTS:
+        return None
+    moved, status, _ = cv2.calcOpticalFlowPyrLK(before, after, points, np.empty(0))
+    good = status.ravel() == 1
+    if int(good.sum()) < MIN_POINTS:
+        return None
+    matrix, _ = cv2.estimateAffinePartial2D(
+        points[good], moved[good], method=cv2.RANSAC
+    )
+    if matrix is None:
+        return None
+    height, width = before.shape
+    # The fit's own translation is the corner's: zoom and roll would leak into pan and tilt.
+    centre = np.array([width / 2, height / 2])
+    shift = matrix @ np.append(centre, 1.0) - centre
+    scale = math.hypot(float(matrix[0, 0]), float(matrix[1, 0]))
+    return float(shift[0]) / width, float(shift[1]) / width, math.log(scale)
+
+
+def _step(before: Array, after: Array, mask: Array | None) -> Motion | None:
+    """Off people when the frame has any; on the whole frame if too few corners are left."""
+    found = _motion(before, after, mask) if mask is not None else None
+    return found or _motion(before, after, None)
+
+
+def _mask(shape: tuple[int, ...], boxes: list[list[int]], ratio: float) -> Array | None:
+    if not boxes:
+        return None
+    mask = np.full(shape, 255, dtype=np.uint8)
+    for x1, y1, x2, y2 in ([max(0, round(v * ratio)) for v in box] for box in boxes):
+        mask[y1:y2, x1:x2] = 0
+    return mask
+
+
+def _motions(
+    cfg: Config, tracks_meta: dict[str, Any], size: tuple[int, int]
+) -> list[Motion | None]:
+    """Camera motion for every frame pair i to i + 1, with 06's person boxes masked out."""
+    boxes: dict[int, list[list[int]]] = {}
+    for shot in tracks_meta["shots"]:
+        for track in shot.get("tracks", []):
+            for row in track["frames"]:
+                boxes.setdefault(int(row["frame"]), []).append(row["body"])
+    capture = cv2.VideoCapture(str(cfg.video))
+    if not capture.isOpened():
+        raise RuntimeError(f"cannot open {cfg.video}")
+    steps: list[Future[Motion | None]] = []
+    previous: tuple[Array, Array | None] | None = None
+    with ThreadPoolExecutor(MOTION_THREADS) as pool:
+        index = 0
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            height, width = frame.shape[:2]
+            ratio = MOTION_SIDE / min(height, width)
+            small = cv2.resize(
+                frame,
+                (round(width * ratio), round(height * ratio)),
+                interpolation=cv2.INTER_AREA,
+            )
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            # 06's boxes are in the pixels it read, which may be 01's resized frames
+            mask = _mask(gray.shape, boxes.get(index, []), ratio * width / size[0])
+            if previous is not None:
+                steps.append(pool.submit(_step, previous[0], gray, previous[1]))
+            previous, index = (gray, mask), index + 1
+    capture.release()
+    return [s.result() for s in steps]
+
+
+def _camera(steps: list[Motion | None], fps: float) -> dict[str, Any]:
+    """The rig from the frame centre's shake, the move from its net shift or zoom per second."""
+    known = [s for s in steps if s is not None]
+    if len(known) < 2:
+        return {
+            "movement": "unknown",
+            "rig": None,
+            "move": None,
+            "direction": None,
+            "pairs": len(known),
+        }
+    tx, ty, scale = (np.asarray(v) for v in zip(*known))
+    seconds = len(known) / fps
+    pan, tilt, zoom = (float(v.sum()) / seconds for v in (tx, ty, scale))
+    jitter = float(tx.std() + ty.std())
+    rig = "handheld" if jitter > SHAKE else "steady"
+    # directions are the camera's: content sliding left is a pan right
+    if max(abs(pan), abs(tilt), abs(zoom)) < STILL:
+        move, direction = "none", None
+    elif abs(zoom) >= max(abs(pan), abs(tilt)):
+        move, direction = "zoom", ("in" if zoom > 0 else "out")
+    elif abs(pan) >= abs(tilt):
+        move, direction = "pan", ("right" if pan < 0 else "left")
+    else:
+        move, direction = "tilt", ("down" if tilt < 0 else "up")
+    still = "static" if move == "none" else move
+    return {
+        # one label, as AVE's: a handheld camera that also pans is handheld
+        "movement": "handheld" if rig == "handheld" else still,
+        "rig": rig,
+        "move": move,
+        "direction": direction,
+        "pan": round(pan, 4),
+        "tilt": round(tilt, 4),
+        "zoom": round(zoom, 4),
+        "jitter": round(jitter, 5),
+        "pairs": len(known),
+    }
+
+
 def run(cfg: Config) -> dict[str, Any]:
     segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
     routing = _read(cfg.json_dir, "routing.json", "04-router")
@@ -710,7 +834,11 @@ def run(cfg: Config) -> dict[str, Any]:
         for segment in record["segments"]:
             by_segment.setdefault(int(segment), []).append(int(record["person_id"]))
 
-    cameras = {int(s["index"]): s.get("camera") for s in segmentation["shots"]}
+    motions = _motions(cfg, tracks_meta, size)
+    cameras: dict[int, dict[str, Any]] = {}
+    for s in segmentation["shots"]:  # pairs inside the shot only
+        first, last = int(s["start_frame"]), int(s["end_frame"])
+        cameras[int(s["index"])] = _camera(motions[first:last], fps)
     stride = max(1, int(tracks_meta["det_stride"]))
     shots: list[dict[str, Any]] = []
     for shot in conditional["shots"]:
