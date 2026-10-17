@@ -235,6 +235,7 @@ FIELDS: tuple[tuple[str, str, str, str, Callable[[Kit], Any]], ...] = (
 LEVEL_OF = {name: level for name, level, _, _, _ in FIELDS}
 KIND_OF = {name: kind for name, _, _, kind, _ in FIELDS}
 LOGGED = {"shot lengths"}  # fields read as logarithms
+RARE = {"tags", "place", "objects", "animals"}  # label sets where a label counts more the fewer videos carry it
 
 
 def _blank(values: list[Any], out: Array) -> Array:
@@ -327,6 +328,18 @@ def _calibrate(raw: Array, kind: str, method: str) -> Array:
     return out
 
 
+def _rare(values: list[Any]) -> list[Any]:
+    """Each label's weight times log((N + 1) / videos carrying it): a label on every video says little about
+    which are alike. The + 1 keeps such a label above 0, so two identical sets still compare."""
+    carried: dict[str, int] = {}
+    for v in values:
+        for k, w in (v or {}).items():
+            if w > 0:
+                carried[k] = carried.get(k, 0) + 1
+    n = len(values)
+    return [None if v is None else {k: w * math.log((n + 1) / carried.get(k, 1)) for k, w in v.items()} for v in values]
+
+
 def _nanmean(matrices: list[Array]) -> Array:
     stack = np.stack(matrices)
     have = ~np.isnan(stack)
@@ -342,7 +355,7 @@ def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
     values: dict[str, list[Any]] = {}
     for name, _, _, kind, read in FIELDS:
         values[name] = [read(kit) for kit in kits]
-        raw[name] = DISTANCES[kind](values[name])
+        raw[name] = DISTANCES[kind](_rare(values[name]) if name in RARE else values[name])
         fields[name] = _calibrate(raw[name], kind, method)
     groups: dict[tuple[str, str], Array] = {}
     for level, group in dict.fromkeys((lv, g) for _, lv, g, _, _ in FIELDS):

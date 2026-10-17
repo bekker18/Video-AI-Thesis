@@ -25,6 +25,8 @@ MOTION = {
     "tilt": "tilt",
     "zoom": "zoom",
 }
+RIG = {"locked": "steady", "handheld": "handheld"}  # what 09's rig answers
+MOVE = {"locked": "none", "pan": "pan", "tilt": "tilt", "zoom": "zoom"}  # and its move
 SIZE = {
     "extreme-wide": "extreme long",
     "wide": "long",
@@ -277,6 +279,8 @@ def main() -> None:
         k: []
         for k in (
             "camera_motion",
+            "camera_rig",
+            "camera_move",
             "people_visible",
             "people_tracked",
             "people_followed",
@@ -360,12 +364,19 @@ def main() -> None:
             index = int(segment["index"])
             paired += 1
             people = _values(label, "num-people", PEOPLE)
-            movement = (segment.get("camera") or {}).get("movement")
+            camera = (enunciative.get(index) or {}).get("camera") or {}
+            movement = camera.get("movement")
             rows["camera_motion"].append(
                 (
                     _values(label, "shot-motion", MOTION),
                     None if movement in (None, "unknown") else movement,
                 )
+            )
+            rows["camera_rig"].append(
+                (_values(label, "shot-motion", RIG), camera.get("rig"))
+            )
+            rows["camera_move"].append(
+                (_values(label, "shot-motion", MOVE), camera.get("move"))
             )
             subjects = set(label.get("shot-subject", []))
 
@@ -417,6 +428,8 @@ def main() -> None:
         "camera_motion": _categorical(
             rows["camera_motion"], tuple(MOTION.values()), False
         ),
+        "camera_rig": _categorical(rows["camera_rig"], tuple(RIG.values()), False),
+        "camera_move": _categorical(rows["camera_move"], tuple(MOVE.values()), False),
         "people_visible": _categorical(rows["people_visible"], COUNTS, True),
         "people_tracked": _categorical(rows["people_tracked"], COUNTS, True),
         "people_followed": _categorical(rows["people_followed"], COUNTS, True),

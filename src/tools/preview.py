@@ -8,6 +8,7 @@ import bisect
 import itertools
 import json
 import math
+import os
 import sys
 import textwrap
 from collections.abc import Callable
@@ -1473,6 +1474,14 @@ def _graph(c: Column, relations: list[dict[str, Any]], floor: float) -> None:
         )
 
 
+def _camera_cell(camera: dict[str, Any]) -> str:
+    """The label, with a direction only when the label is the move; the moves line has the rest."""
+    cell = camera.get("movement") or "-"
+    if camera.get("direction") and camera.get("move") in (None, cell):
+        cell += f" {camera['direction']}"
+    return cell
+
+
 def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
     size = 9.0
     columns = (
@@ -1498,8 +1507,7 @@ def _framing_table(c: Column, segments: list[dict[str, Any]]) -> None:
             str(s["visible_at_once"]),
             str(s["followed"]),
             distance["scale"] if distance else "-",
-            " ".join(v for v in (camera.get("movement"), camera.get("direction")) if v)
-            or "-",
+            _camera_cell(camera),
             s.get("portrait_scene") or "-",
             CHECK.get(s["assessment"], s["assessment"]),
         )
@@ -1554,10 +1562,12 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
         )
     c.heading("Framing per segment")
     moves = kit["enunciative"].get("camera") or {}
+    turns = kit["enunciative"].get("camera_moves") or {}
     if moves:
-        c.text(
-            "Camera: " + ", ".join(f"{k} {v:.0%}" for k, v in moves.items()), size=9.5
-        )
+        line = "Camera: " + ", ".join(f"{k} {v:.0%}" for k, v in moves.items())
+        if turns:
+            line += " · moves: " + ", ".join(f"{k} {v:.0%}" for k, v in turns.items())
+        c.text(line, size=9.5)
     _framing_table(c, kit["enunciative"]["segments"])
 
 
@@ -1644,18 +1654,31 @@ def _thumb(
         ax.imshow(image)
 
 
+def _shared_prefix(names: list[str]) -> str:
+    """What every name starts with, up to its last separator (a download site's tag): left off labels."""
+    common = os.path.commonprefix(names) if len(names) > 1 else ""
+    return common[: max(common.rfind(s) for s in "_.-") + 1]
+
+
+def _label(name: str, prefix: str, width: int) -> str:
+    short = name[len(prefix) :]
+    return short if len(short) <= width else short[: width - 1] + "…"
+
+
 def _ranked(row: list[float | None], me: int) -> list[tuple[int, float]]:
     """Every other measured video, nearest first."""
     found = [(j, float(d)) for j, d in enumerate(row) if j != me and d is not None]
     return sorted(found, key=lambda jd: (jd[1], jd[0]))
 
 
-def _reference(fig: Figure, root: Path, name: str, report: dict[str, Any]) -> None:
+def _reference(
+    fig: Figure, root: Path, name: str, prefix: str, report: dict[str, Any]
+) -> None:
     c = _box(fig, (0.015, 0.03, 0.165, 0.875), "Reference")
     height = 0.2
     _thumb(fig, (c.x, c.y - height, c.width, height), _typical_frame(root))
     c.y -= height + 0.01
-    c.text(name, size=12.5, weight="bold")
+    c.text(_label(name, prefix, 24), size=12.5, weight="bold")
     kit_path = root / "identikit.json"
     if kit_path.exists():
         kit = json.loads(kit_path.read_text(encoding="utf-8"))
@@ -1696,7 +1719,8 @@ def _reference(fig: Figure, root: Path, name: str, report: dict[str, Any]) -> No
     c.y -= math.ceil(len(chosen) / 2) * (cell_h + 0.006) + 0.01
     c.text(
         f"Compared with {len(report['videos']) - 1} videos, calibration {report['calibration']}. "
-        "Distances run from 0, the same, to 1.",
+        "Distances run from 0, the same, to 1."
+        + (f" Names leave out the {prefix} they all start with." if prefix else ""),
         size=9,
         colour=MUTED,
     )
@@ -1711,6 +1735,7 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
         sys.exit(f"{root.name} is not in {report_path}; rerun the score with it")
     me = names.index(root.name)
     processed = root.parent
+    prefix = _shared_prefix(names)
 
     fig = Figure(figsize=PAGE_SIZE, dpi=100, facecolor=PAGE)
     fig.text(
@@ -1725,13 +1750,13 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
     fig.text(
         0.018,
         0.95,
-        f"{root.name} against the collection, nearest to farthest by each level of the score, "
+        f"{_label(root.name, prefix, 24)} against the collection, nearest to farthest by each level of the score, "
         "after FRESCO's Figure 11 (Morra et al., CVIU 2024)",
         fontsize=13,
         color=SECONDARY,
         va="top",
     )
-    _reference(fig, root, root.name, report)
+    _reference(fig, root, root.name, prefix, report)
 
     left, right, top, bottom = 0.2, 0.985, 0.895, 0.03
     gap, label_h = 0.008, 0.017
@@ -1794,7 +1819,7 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
                 fig.text(
                     x + (cell_w - 0.006) / 2,
                     y + label_h - 0.002,
-                    f"{other[:12]} · {distance:.2f}",
+                    f"{_label(other, prefix, 12)} · {distance:.2f}",
                     ha="center",
                     va="top",
                     fontsize=8,
