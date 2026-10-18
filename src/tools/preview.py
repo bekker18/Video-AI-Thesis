@@ -103,6 +103,10 @@ def _colour(track_id: int) -> tuple[int, int, int]:
     return PALETTE[track_id % len(PALETTE)]
 
 
+def _top(scores: dict[str, float]) -> str:
+    return max(scores.items(), key=lambda kv: kv[1])[0]
+
+
 def _centre(box: list[int]) -> tuple[int, int]:
     return (box[0] + box[2]) // 2, (box[1] + box[3]) // 2
 
@@ -437,12 +441,12 @@ def _conditional_view(root: Path) -> Draw:
                     ("  ".join(f"{k} {v:.2f}" for k, v in shapes), (170, 170, 170))
                 )
             found = attrs.get((shot_id, tid))
-            if found and found.get("gender_age"):
-                first = found["gender_age"][0]
+            if found and found.get("fairface"):
+                first = found["fairface"][0]
                 labels = found["clip"][0][:2] if found.get("clip") else []
                 lines.append(
                     (
-                        f"{first['gender']} ~{first['age']}  "
+                        f"{_top(first['gender'])} {_top(first['age'])}  "
                         + ", ".join(str(x["label"])[9:] for x in labels),
                         (150, 200, 150),
                     )
@@ -1254,21 +1258,17 @@ def _card(c: Column, p: dict[str, Any], watch: dict[str, Any] | None) -> None:
     )
     lines: list[str] = []
     if p.get("age"):
-        lines.append(f"Age {p['age']['mean']:.1f}{_sd(p['age'])} (n={p['age']['n']})")
+        a = p["age"]
+        lines.append(f"Age {a['modal']}, agreement {a['agreement']:.0%} (n={a['n']})")
     if p.get("gender"):
         g = p["gender"]
         lines.append(
-            f"Gender {g['label']}, agreement {g['agreement']:.0%} (n={g['n']})"
+            f"Gender {g['modal']}, agreement {g['agreement']:.0%} (n={g['n']})"
         )
     if p.get("perceived_ethnicity"):
         e = p["perceived_ethnicity"]
         lines.append(
             f"Perceived ethnicity {e['modal']}, agreement {e['agreement']:.0%} (n={e['n']}, {e['taxonomy']})"
-        )
-    if p.get("demographic_check"):
-        d = p["demographic_check"]
-        lines.append(
-            f"FairFace check: gender agrees {d['gender_agreement']:.0%}, age in bracket {d['age_in_bracket']:.0%} (n={d['n']})"
         )
     if p.get("emotion"):
         e = p["emotion"]
