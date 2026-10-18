@@ -127,12 +127,12 @@ FILES: dict[str, tuple[File, ...]] = {
     ),
 }
 
-# InsightFace ships its models as one release zip; two of the five are used.
+# InsightFace ships its models as one release zip; only ArcFace is used.
 ARCHIVES: dict[str, tuple[Archive, ...]] = {
     "07-conditional-experts": (
         Archive(
             f"{INSIGHTFACE}/buffalo_l.zip",
-            ("w600k_r50.onnx", "genderage.onnx"),
+            ("w600k_r50.onnx",),
         ),
     ),
 }

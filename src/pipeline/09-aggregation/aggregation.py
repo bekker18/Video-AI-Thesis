@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import json
 import math
-from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -168,13 +167,28 @@ def _address(samples: list[dict[str, Any]], cone: float) -> dict[str, Any]:
     return {"n": len(looks), "share": round(hits / len(looks), 3)}
 
 
-def _top(scores: dict[str, float]) -> str:
-    return max(scores.items(), key=lambda kv: kv[1])[0]
+def _readable(crop: dict[str, Any], cfg: Config) -> bool:
+    """08's floors: FairFace's published accuracies are for clear, near-frontal faces."""
+    return (
+        float(crop["area"]) >= cfg.identity_min_area
+        and float(crop["frontality"] or 0.0) >= cfg.identity_min_front
+    )
 
 
-def _in_bracket(age: float, bracket: str) -> bool:
-    low, _, high = bracket.rstrip("+").partition("-")
-    return float(low) <= age < (float(high) + 1 if high else float("inf"))
+def _demographics(
+    entries: list[dict[str, Any]],
+    crops: dict[int, tuple[int, dict[str, Any]]],
+    cfg: Config,
+) -> dict[str, Any]:
+    """FairFace's perceived gender and age bracket, from face crops that clear 08's floors."""
+    kept = [e for e in entries if _readable(crops[int(e["frame"])][1], cfg)]
+    return {
+        **{
+            head: _distribution([e[head] for e in kept], tuple(entries[0][head]))
+            for head in ("gender", "age")
+        },
+        "withheld": {"low_quality": len(entries) - len(kept)},
+    }
 
 
 def _ethnicity(
@@ -190,10 +204,7 @@ def _ethnicity(
         segment, crop = crops[int(entry["frame"])]
         if segment not in live:
             footage += 1
-        elif (
-            float(crop["area"]) < cfg.identity_min_area
-            or float(crop["frontality"] or 0.0) < cfg.identity_min_front
-        ):
+        elif not _readable(crop, cfg):
             quality += 1
         else:
             kept.append(entry["ethnicity"])
@@ -202,25 +213,6 @@ def _ethnicity(
         "taxonomy": TAXONOMY,
         **found,
         "withheld": {"not_live_action": footage, "low_quality": quality},
-    }
-
-
-def _cross_check(
-    gender_age: list[dict[str, Any]], fairface: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """InsightFace genderage against FairFace's gender and age heads, crop by crop."""
-    theirs = {int(f["frame"]): f for f in fairface}
-    pairs = [
-        (g, theirs[int(g["frame"])]) for g in gender_age if int(g["frame"]) in theirs
-    ]
-    if not pairs:
-        return {"n": 0}
-    gender = sum(1 for g, f in pairs if g["gender"] == _top(f["gender"]))
-    age = sum(1 for g, f in pairs if _in_bracket(float(g["age"]), _top(f["age"])))
-    return {
-        "n": len(pairs),
-        "gender_agreement": round(gender / len(pairs), 3),
-        "age_in_bracket": round(age / len(pairs), 3),
     }
 
 
@@ -333,26 +325,8 @@ def _person(
         record["pose"] = pose
     record["by_segment"] = _by_segment(series, spans, fps, cfg)
 
-    if attrs.get("gender_age"):
-        ages = [float(g["age"]) for g in attrs["gender_age"]]
-        votes = Counter(str(g["gender"]) for g in attrs["gender_age"])
-        winner, count = votes.most_common(1)[0]
-        confidence = [
-            float(g["gender_score"])
-            for g in attrs["gender_age"]
-            if g["gender"] == winner
-        ]
-        record["demographics"] = {
-            "age": _stats(ages),
-            "gender": {
-                "label": winner,
-                "agreement": round(count / sum(votes.values()), 3),
-                "confidence": round(float(np.mean(confidence)), 4),
-                "n": sum(votes.values()),
-            },
-            "cross_check": _cross_check(attrs["gender_age"], attrs.get("fairface", [])),
-        }
     if attrs.get("fairface"):
+        record["demographics"] = _demographics(attrs["fairface"], crops, cfg)
         record["perceived_ethnicity"] = _ethnicity(attrs["fairface"], crops, live, cfg)
     if attrs.get("clip"):
         record["attributes"] = _labelled(attrs["clip"], cfg.agg_top)
@@ -795,7 +769,6 @@ def run(cfg: Config) -> dict[str, Any]:
         attrs: dict[str, list[Any]] = {
             "embedding_rows": [],
             "body_rows": [],
-            "gender_age": [],
             "fairface": [],
             "clip": [],
         }

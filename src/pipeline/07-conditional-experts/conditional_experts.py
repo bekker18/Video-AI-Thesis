@@ -13,8 +13,8 @@ from typing import Any, TypeAlias
 import cv2
 import numpy as np
 
-from src.tools import download_models
 from config import Config
+from src.tools import download_models
 
 STAGE = "07-conditional-experts"
 SEGMENTER = "02-segmentation"  # MobileCLIP cache is reused from there
@@ -23,7 +23,6 @@ FACE_MODEL = "face_landmarker.task"
 POSE_MODEL = "pose_landmarker_full.task"
 EMOTION_MODEL = "emotion_enet_b0_va.onnx"
 ARCFACE_MODEL = "w600k_r50.onnx"
-GENDERAGE_MODEL = "genderage.onnx"
 OCR_MODEL = "text_crnn_en.onnx"
 REID_MODEL = "reid_youtu.onnx"
 FAIRFACE_MODEL = "res34_fair_align_multi_7_20190809.pt"
@@ -44,7 +43,7 @@ EMOTIONS = (
 OCR_CHARSET = "0123456789abcdefghijklmnopqrstuvwxyz"
 REID_INPUT = (128, 256)  # width, height
 REID_BATCH = 16
-ONNX_BATCH = 32  # emotion, ArcFace and genderage inputs per call
+ONNX_BATCH = 32  # emotion and ArcFace inputs per call
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], np.float32)
 
@@ -150,7 +149,6 @@ def _new_entry() -> dict[str, Any]:
     return {
         "embedding_rows": [],
         "body_rows": [],
-        "gender_age": [],
         "fairface": [],
         "clip": [],
     }
@@ -370,31 +368,6 @@ def _embed_bodies(session: Any, crops: list[Array]) -> Array:
     norms = np.linalg.norm(stacked, axis=1, keepdims=True)
     result: Array = stacked / np.where(norms == 0, 1.0, norms)
     return result
-
-
-def _gender_ages(session: Any, faces: list[Array]) -> list[dict[str, Any]]:
-    tensors = [
-        cv2.cvtColor(
-            cv2.resize(face, (96, 96), interpolation=cv2.INTER_LINEAR),
-            cv2.COLOR_BGR2RGB,
-        )
-        .astype(np.float32)
-        .transpose(2, 0, 1)
-        for face in faces
-    ]
-    out: list[dict[str, Any]] = []
-    for raw in _run_batched(session, tensors):
-        # The two gender outputs are unnormalised, so a raw max is not a confidence.
-        exp = np.exp(raw[:2] - raw[:2].max())
-        probs = exp / exp.sum()
-        out.append(
-            {
-                "gender": "male" if int(np.argmax(raw[:2])) == 1 else "female",
-                "gender_score": round(float(probs.max()), 4),
-                "age": round(float(raw[2]) * 100),
-            }
-        )
-    return out
 
 
 def _recogniser(model_dir: Path) -> Any:
@@ -753,14 +726,12 @@ def run(cfg: Config) -> dict[str, Any]:
     per_track: dict[tuple[int, int], dict[str, Any]] = {}
     if attribute_jobs and face_landmarker is not None:
         arcface = _session(model_dir / ARCFACE_MODEL)
-        genderage = _session(model_dir / GENDERAGE_MODEL)
 
         clip_crops: list[Array] = []
         clip_keys: list[tuple[int, int]] = []
         fair_crops: list[Array] = []
         fair_keys: list[tuple[int, int, int]] = []
         faces: list[Array] = []
-        ages: list[dict[str, Any]] = []
         for shot, track_id, frame, path in attribute_jobs:
             image = cv2.imread(str(path))
             if image is None:
@@ -784,8 +755,6 @@ def run(cfg: Config) -> dict[str, Any]:
             # keyed by crop frame: not every crop yields a row, and 08 gates by crop
             entry["embedding_rows"].append({"row": len(faces), "frame": frame})
             faces.append(aligned)
-            ages.append({"frame": frame})  # filled by the batched genderage pass below
-            entry["gender_age"].append(ages[-1])
             clip_crops.append(image)  # CLIP reads the unaligned crop
             clip_keys.append((shot, track_id))
             fair_crops.append(
@@ -796,8 +765,6 @@ def run(cfg: Config) -> dict[str, Any]:
             fair_keys.append((shot, track_id, frame))
 
         embeddings = _embed_faces(arcface, faces)
-        for age, result in zip(ages, _gender_ages(genderage, faces)):
-            age.update(result)
 
         if clip_crops:
             found = _clip_attributes(
@@ -937,9 +904,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "body_pose": POSE_MODEL,
             "emotion": EMOTION_MODEL,
             "identity": ARCFACE_MODEL,
-            "gender_age": GENDERAGE_MODEL,
             "body_appearance": REID_MODEL,
-            "perceived_ethnicity": f"FairFace ResNet-34, {FAIRFACE_MODEL}",
+            "gender_age_ethnicity": f"FairFace ResNet-34, {FAIRFACE_MODEL}",
             "ocr": OCR_MODEL,
             "attributes": CLIP_MODEL,
             "gaze": f"{download_models.GAZE_MODEL} at {download_models.GAZE_REPO}",
