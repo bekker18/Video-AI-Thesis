@@ -100,7 +100,6 @@ PROVENANCE: dict[str, str] = {
     "figurative.subjects": "06 YOLO11 temporal union of animal classes, via 09, against --subject-min",
     "figurative.persons[].perceived_ethnicity": "07 FairFace ResNet-34 on live-action face crops "
     "clearing 08's floors, via 09",
-    "figurative.persons[].demographic_check": "07 InsightFace genderage against FairFace, via 09",
     "enunciative.persons[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
     "enunciative.segments[].address": "07 MediaPipe head pose and Gaze-LLE, via 09",
     "enunciative.segments[].camera": "09 LK flow on corners off 06's person boxes, a RANSAC similarity per frame pair",
@@ -115,8 +114,8 @@ PROVENANCE: dict[str, str] = {
     "figurative.video.objects": "06 YOLO11 temporal union, via 09; the classes listed in some segment",
     "figurative.segments[].crowdedness": "03 YOLO11 person count over keyframes",
     "figurative.persons[].links": "08 ArcFace and YouTu ReID cosine",
-    "figurative.persons[].age": "07 InsightFace genderage, via 09",
-    "figurative.persons[].gender": "07 InsightFace genderage, via 09",
+    "figurative.persons[].age": "07 FairFace ResNet-34, 9 age brackets, on face crops clearing 08's floors, via 09",
+    "figurative.persons[].gender": "07 FairFace ResNet-34 on face crops clearing 08's floors, via 09",
     "figurative.persons[].attributes": "07 MobileCLIP zero-shot, via 09",
     "figurative.persons[].emotion": "07 HSEmotion EfficientNet-B0, via 09",
     "figurative.persons[].valence": "07 HSEmotion EfficientNet-B0, via 09",
@@ -141,7 +140,8 @@ CAVEATS: tuple[str, ...] = (
     "place comes from Places365 and is weak on broadcast and animated footage; tags are steadier",
     "depth is relative disparity within each keyframe, 1 nearest: an order and ratios, not distances",
     "centralities and depth are per label: panoptic segments are not matched across keyframes",
-    "age and gender are a perceived estimate from one small model, not a property of a person",
+    "gender and age are FairFace's perceived estimate, age as one of 9 brackets, not a property of "
+    "a person; they are read on face crops that clear 08's floors",
     "text is read by a CRNN in ten-character chunks, so word boundaries are not real",
     "visible_at_once is the maximum over a segment's keyframes, so it is itself a lower bound",
     "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
@@ -385,7 +385,6 @@ def _person(
     person: dict[str, Any], links: list[dict[str, Any]], keep: int
 ) -> tuple[dict[str, Any], list[str]]:
     demographics = person.get("demographics") or {}
-    gender = demographics.get("gender")
     emotion = person.get("emotion") or {}
     attributes, dropped = _attributes(person.get("attributes") or [], keep)
     record = {
@@ -396,16 +395,15 @@ def _person(
         "linked": person["linked"],
         "abstained": person["abstained"],
         "links": links,
-        "age": _measure(demographics.get("age")),
-        "gender": {k: gender[k] for k in ("label", "agreement", "confidence", "n")}
-        if gender
-        else None,
+        "age": _counted(
+            demographics.get("age"), ("modal", "agreement", "distribution", "n")
+        ),
+        "gender": _counted(
+            demographics.get("gender"), ("modal", "agreement", "distribution", "n")
+        ),
         "perceived_ethnicity": _counted(
             person.get("perceived_ethnicity"),
             ("taxonomy", "modal", "agreement", "distribution", "n"),
-        ),
-        "demographic_check": _counted(
-            demographics.get("cross_check"), ("gender_agreement", "age_in_bracket", "n")
         ),
         "attributes": attributes,
         "emotion": {k: emotion[k] for k in ("modal", "agreement", "n", "distribution")}
@@ -608,6 +606,7 @@ def run(cfg: Config) -> dict[str, Any]:
     heads: list[dict[str, Any]] = []
     tracked_only: list[int] = []
     conflicts: list[dict[str, Any]] = []
+    demographics_withheld: list[dict[str, Any]] = []
     ethnicity_withheld: list[dict[str, Any]] = []
     for person in aggregated["persons"]:
         pid = int(person["person_id"])
@@ -631,6 +630,9 @@ def run(cfg: Config) -> dict[str, Any]:
             )
         if dropped:
             conflicts.append({"person_id": pid, "dropped": dropped})
+        demographics = person.get("demographics")
+        if demographics and not demographics["gender"]["n"]:
+            demographics_withheld.append({"person_id": pid, **demographics["withheld"]})
         withheld = person.get("perceived_ethnicity")
         if withheld and not withheld["n"]:
             ethnicity_withheld.append({"person_id": pid, **withheld["withheld"]})
@@ -874,6 +876,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 if e["assessment"] == "under_tracked"
             ],
             "attribute_conflicts": conflicts,
+            "demographics_withheld": demographics_withheld,
             "ethnicity_withheld": ethnicity_withheld,
             "face_outside_body": relations["face_outside_body"],
             "caveats": list(CAVEATS),
