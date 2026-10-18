@@ -33,6 +33,7 @@ RESTARTS = 20  # k-medoids runs, the cheapest kept
 SEED = 0
 TOP = 5  # nearest videos listed
 HELD_BY = 3  # fields listed for what a cluster shares
+AGE_BRACKETS = ("0-2", "3-9", "10-19", "20-29", "30-39", "40-49", "50-59", "60-69", "70+")  # FairFace's
 
 
 def _mix(weights: dict[str, float]) -> Mix | None:
@@ -128,17 +129,19 @@ def _described(kit: Kit) -> list[dict[str, Any]]:
 
 
 def _women(kit: Kit) -> float | None:
-    gendered = [(p["gender"]["label"], float(p["seconds"])) for p in _described(kit) if p.get("gender")]
+    gendered = [(p["gender"]["modal"], float(p["seconds"])) for p in _described(kit) if p.get("gender")]
     total = sum(s for _, s in gendered)
     return sum(s for g, s in gendered if g == "female") / total if total > 0 else None
 
 
 def _ages(kit: Kit) -> tuple[Array, Array] | None:
-    found = [(float(p["age"]["mean"]), float(p["seconds"])) for p in _described(kit) if p.get("age")]
-    found = [(a, s) for a, s in found if s > 0]
-    if not found:
-        return None
-    return np.asarray([a for a, _ in found]), np.asarray([s for _, s in found])
+    """The persons' age-bracket mixes weighted by screen time, on the brackets' positions in order."""
+    weights = np.zeros(len(AGE_BRACKETS))
+    for p in _described(kit):
+        if p.get("age"):
+            weights += float(p["seconds"]) * np.array([float(p["age"]["distribution"][b]) for b in AGE_BRACKETS])
+    held = np.flatnonzero(weights > 0)
+    return (held.astype(float), weights[held]) if len(held) else None
 
 
 def _emotion(kit: Kit) -> Mix | None:
@@ -410,13 +413,18 @@ def _kmedoids(d: Array, k: int) -> Array:
 
 def _typical(name: str, values: list[Any]) -> Any:
     """A cluster's value of a field: the mean of a number, the leading labels of a mix or set, the
-    median of a distribution, in seconds for shot lengths."""
+    median of a distribution, in seconds for shot lengths and as a bracket for age."""
     present = [v for v in values if v is not None]
     kind = KIND_OF[name]
     if not present or kind == "histogram":
         return None
     if kind in ("share", "scalar"):
         return round(float(np.mean(present)), 3)
+    if name == "age":
+        pooled = np.zeros(len(AGE_BRACKETS))
+        for x, w in present:
+            np.add.at(pooled, x.astype(int), w / w.sum())
+        return AGE_BRACKETS[int(np.searchsorted(np.cumsum(pooled), pooled.sum() / 2))]
     if kind == "samples":
         middle = float(np.median([np.median(x) for x, _ in present]))
         return round(math.exp(middle) if name in LOGGED else middle, 2)
@@ -484,6 +492,8 @@ def _clusters(
 def _text(typical: Any) -> str:
     if isinstance(typical, dict):
         return ", ".join(f"{k} {v:g}" for k, v in typical.items())
+    if isinstance(typical, str):
+        return typical
     return "-" if typical is None else f"{typical:g}"
 
 
