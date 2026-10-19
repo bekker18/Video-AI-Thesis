@@ -1,23 +1,4 @@
-"""08-identity: resolve segment-local tracks into global person ids.
-
-Identity is resolved at three widening scopes along the pipeline: presence flags at 03,
-segment-local track ids at 06, and global person ids here. This is the main resolver,
-not a repair step - within-segment association is motion-only and survives about two seconds,
-so a single busy segment fragments one person into many tracks.
-Most of the identity in a video is established here.
-
-A pure function like 04, 09 and 10: no models, no GPU, byte-identical across runs.
-07 does the embedding, this does the clustering, which is what makes threshold tuning cost a second.
-
-Two passes, because the priors differ. Inside a segment lighting and pose are stable,
-so the threshold can be strict and the only merges available are the ones motion could not make.
-Across a cut nothing is stable and the threshold must be looser. One pass would conflate them.
-
-Abstention is permitted and is the point: a track whose crops are all blurred,
-tiny or non-frontal is left unlinked rather than forced into the nearest cluster.
-A wrong link merges two people's demographics, emotion distributions and gaze statistics into one fictitious person,
-and nothing downstream can detect that it happened.
-"""
+"""08-identity: 06's segment-local tracks into global person ids by face and body appearance."""
 
 from __future__ import annotations
 
@@ -36,6 +17,14 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 Key: TypeAlias = tuple[int, int]  # (segment, track_id)
 
+# One person boxed twice, set on the reels (STATE.md, One person tracked twice)
+SAME_FACE_SHARE = 0.8
+SAME_FACE_FRAMES = 2
+SAME_FACE_IOU = 0.5
+SAME_FACE_VETO = 0.26  # same-person face cosine, 1st percentile
+SEATED_SIDE = 0.25  # face centre off the body midline, in box widths
+SEATED_TOP = 0.5  # face centre in this top share of the body box
+
 
 def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
     path = json_dir / name
@@ -46,7 +35,6 @@ def _read(json_dir: Path, name: str, produced_by: str) -> dict[str, Any]:
 
 
 def _load(embeddings_dir: Path, name: str) -> Array:
-    """A modality with no rows is normal - cat1.mp4 yields no face at all."""
     path = embeddings_dir / name
     if not path.exists():
         return np.zeros((0, 0), dtype=np.float32)
@@ -55,15 +43,7 @@ def _load(embeddings_dir: Path, name: str) -> Array:
 
 
 def _usable(crop: dict[str, Any], cfg: Config, kind: str) -> bool:
-    """Absolute floors, not 06's `score`, which is normalised within its own track and so
-    rates the best of five blurred non-faces highly.
-
-    Sharpness is deliberately not one of them. It is Laplacian variance, and its scale is
-    a property of the footage rather than of the crop: the median across these clips runs from
-    10 on thanos.mp4 to 1139 on messi.mp4, so any absolute floor that catches a blurred crop
-    in one clip discards every crop in another. Area is pixels and frontality is a normalised
-    ratio; both mean the same thing in every clip.
-    """
+    """Absolute floors, not 06's per-track `score`; sharpness has no clip-independent scale."""
     if float(crop["area"]) < cfg.identity_min_area:
         return False
     if kind == "face":
@@ -76,8 +56,7 @@ def _usable(crop: dict[str, Any], cfg: Config, kind: str) -> bool:
 def _descriptor(
     rows: list[dict[str, Any]], keep: set[int], table: Array
 ) -> Array | None:
-    """Mean of a track's surviving crop vectors, renormalised. One bad crop in the mean is
-    exactly what produces a wrong link, so gated crops are dropped before averaging."""
+    """Mean of the crop vectors that clear the floors, renormalised."""
     picked = [int(r["row"]) for r in rows if int(r["frame"]) in keep]
     if not picked or not table.size:
         return None
@@ -92,8 +71,7 @@ def _descriptor(
 def _link(
     a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
 ) -> dict[str, Any] | None:
-    """The best modality that clears its own threshold. Two tracks sharing no modality carry
-    no evidence about each other and are never linked on the strength of the other's."""
+    """The best modality clearing its own threshold; one only a track has is no evidence."""
     best: dict[str, Any] | None = None
     for kind, floor in (("face", face_min), ("body", body_min)):
         left, right = a[kind], b[kind]
@@ -112,25 +90,78 @@ def _link(
     return best
 
 
+def _area(box: list[int]) -> int:
+    return max(0, box[2] - box[0]) * max(0, box[3] - box[1])
+
+
+def _iou(a: list[int], b: list[int]) -> float:
+    wide = min(a[2], b[2]) - max(a[0], b[0])
+    tall = min(a[3], b[3]) - max(a[1], b[1])
+    if wide <= 0 or tall <= 0:
+        return 0.0
+    overlap = wide * tall
+    return overlap / (_area(a) + _area(b) - overlap)
+
+
+def _seated(face: list[int], body: list[int]) -> bool:
+    """A body's own face: near the top of its box and its midline."""
+    width, height = body[2] - body[0], body[3] - body[1]
+    if width <= 0 or height <= 0:
+        return False
+    side = abs((face[0] + face[2]) / 2 - (body[0] + body[2]) / 2) / width
+    top = ((face[1] + face[3]) / 2 - body[1]) / height
+    return side <= SEATED_SIDE and top <= SEATED_TOP
+
+
+def _same_face(
+    a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
+) -> dict[str, Any] | None:
+    """One face box seated in both bodies, in most frames both have a face; disagreeing faces veto."""
+    rows_a, rows_b = a["observed"], b["observed"]
+    both = [
+        f
+        for f in rows_a.keys() & rows_b.keys()
+        if rows_a[f]["face"] and rows_b[f]["face"]
+    ]
+    same = sum(
+        _iou(rows_a[f]["face"], rows_b[f]["face"]) > SAME_FACE_IOU
+        and _seated(rows_a[f]["face"], rows_a[f]["body"])
+        and _seated(rows_b[f]["face"], rows_b[f]["body"])
+        for f in both
+    )
+    if same < SAME_FACE_FRAMES or same < SAME_FACE_SHARE * len(both):
+        return None
+    if (
+        a["face"] is not None
+        and b["face"] is not None
+        and float(a["face"] @ b["face"]) < SAME_FACE_VETO
+    ):
+        return None
+    share = same / len(both)
+    return {
+        "modality": "same_face",
+        "similarity": round(share, 4),
+        "threshold": SAME_FACE_SHARE,
+        "margin": round(share - SAME_FACE_SHARE, 4),
+        "shared_faces": same,
+    }
+
+
 def _cluster(
     units: list[dict[str, Any]],
     pairs: list[tuple[int, int]],
     face_min: float,
     body_min: float,
+    link: Any = None,
 ) -> list[dict[str, Any]]:
-    """Complete linkage: a unit joins a cluster only if it clears the threshold against every member.
-    Single linkage would chain distinct people together through one weak intermediate,
-    and the frame-disjointness constraint would stop applying to the cluster as a whole.
-
-    Merging in descending similarity is the standard agglomerative order,
-    and it makes the result independent of the order the tracks happen to arrive in.
-    """
+    """Complete linkage in descending similarity; `link` replaces the appearance rule."""
+    link = link or _link
     scored: list[tuple[float, int, int, dict[str, Any]]] = []
     for i, j in pairs:
-        found = _link(units[i], units[j], face_min, body_min)
+        found = link(units[i], units[j], face_min, body_min)
         if found is not None:
             scored.append((float(found["similarity"]), i, j, found))
-    # Ties broken on the unit keys, so two runs agree.
+    # ties on keys, so two runs agree
     scored.sort(key=lambda s: (-s[0], units[s[1]]["keys"][0], units[s[2]]["keys"][0]))
 
     allowed = {(i, j) for i, j in pairs} | {(j, i) for i, j in pairs}
@@ -145,9 +176,7 @@ def _cluster(
         joined = [(x, y) for x in members[left] for y in members[right]]
         if any((x, y) not in allowed for x, y in joined):
             continue
-        if any(
-            _link(units[x], units[y], face_min, body_min) is None for x, y in joined
-        ):
+        if any(link(units[x], units[y], face_min, body_min) is None for x, y in joined):
             continue
         members[left] += members[right]
         links[left] += links[right] + [
@@ -183,6 +212,19 @@ def _cluster(
     return merged
 
 
+def _yields(
+    keys: list[Key], bodies: dict[Key, dict[int, list[int]]]
+) -> dict[Key, list[int]]:
+    """Frames each track leaves to another of the person: the larger body box keeps a frame."""
+    owner: dict[int, Key] = {}
+    for key in keys:
+        for frame, body in bodies[key].items():
+            held = owner.get(frame)
+            if held is None or _area(body) > _area(bodies[held][frame]):
+                owner[frame] = key
+    return {key: sorted(f for f in bodies[key] if owner[f] != key) for key in keys}
+
+
 def _mean(vectors: list[Array | None]) -> Array | None:
     present = [v for v in vectors if v is not None]
     if not present:
@@ -209,9 +251,8 @@ def run(cfg: Config) -> dict[str, Any]:
                 "attributes", {}
             )
 
-    # One unit per track, carrying its frame set, its two descriptors, and why it has none.
-    units: list[dict[str, Any]] = []
-    abstained: list[dict[str, Any]] = []
+    tracks: list[dict[str, Any]] = []
+    body_boxes: dict[Key, dict[int, list[int]]] = {}
     for shot in tracks_meta["shots"]:
         if not shot["tracked"]:
             continue
@@ -234,22 +275,37 @@ def run(cfg: Config) -> dict[str, Any]:
                 descriptors[kind] = _descriptor(rows, keep, table)
                 counts[kind] = len([r for r in rows if int(r["frame"]) in keep])
 
-            unit = {
-                "keys": [list(key)],
-                "frames": {int(r["frame"]) for r in track["frames"]},
-                "links": [],
-                "face": descriptors["face"],
-                "body": descriptors["body"],
-                "face_crops": counts["face"],
-                "body_crops": counts["body"],
-            }
-            if descriptors["face"] is None and descriptors["body"] is None:
-                abstained.append(unit)
-            else:
-                units.append(unit)
+            body_boxes[key] = {int(r["frame"]): r["body"] for r in track["frames"]}
+            tracks.append(
+                {
+                    "keys": [list(key)],
+                    "frames": set(body_boxes[key]),
+                    "observed": {
+                        int(r["frame"]): r
+                        for r in track["frames"]
+                        if not r["interpolated"]
+                    },
+                    "links": [],
+                    "face": descriptors["face"],
+                    "body": descriptors["body"],
+                    "face_crops": counts["face"],
+                    "body_crops": counts["body"],
+                }
+            )
 
-    # Pass one, inside a segment.
-    # Two tracks sharing a frame cannot be one person, whatever they look like.
+    # Pass zero: one person boxed twice, which shares frames the passes below never join
+    co_present = [
+        (i, j)
+        for i, j in itertools.combinations(range(len(tracks)), 2)
+        if tracks[i]["keys"][0][0] == tracks[j]["keys"][0][0]
+        and tracks[i]["frames"] & tracks[j]["frames"]
+    ]
+    merged = _cluster(tracks, co_present, 0.0, 0.0, link=_same_face)
+    same_face_merges = len(tracks) - len(merged)
+    units = [u for u in merged if u["face"] is not None or u["body"] is not None]
+    abstained = [u for u in merged if u["face"] is None and u["body"] is None]
+
+    # Pass one, inside a segment; tracks sharing a frame are two people
     by_segment: dict[int, list[int]] = {}
     for i, unit in enumerate(units):
         by_segment.setdefault(int(unit["keys"][0][0]), []).append(i)
@@ -264,10 +320,7 @@ def run(cfg: Config) -> dict[str, Any]:
     )
     within_merges = len(units) - len(after_within)
 
-    # Pass two, across segments only.
-    # Same-segment pairs are deliberately not offered a second chance at the looser threshold:
-    # complete linkage then also refuses to merge them transitively through a cross-segment link,
-    # so a merge the strict threshold rejected cannot be laundered by the loose one.
+    # Pass two, across segments only: a merge pass one refused is not re-offered
     across_pairs = [
         (i, j)
         for i, j in itertools.combinations(range(len(after_within)), 2)
@@ -281,17 +334,23 @@ def run(cfg: Config) -> dict[str, Any]:
     )
     across_merges = len(after_within) - len(final)
 
-    # Abstained tracks are people too - downstream must tolerate singletons - they are simply never candidates for a link, and say so.
+    # abstained tracks stay singletons
     everyone = final + abstained
     everyone.sort(key=lambda u: (min(k[0] for k in u["keys"]), u["keys"][0][1]))
 
     persons: list[dict[str, Any]] = []
     for person_id, unit in enumerate(everyone, start=1):
         keys = [[int(a), int(b)] for a, b in unit["keys"]]
+        # 09 and 10 skip a track's yielded frames
+        yields = _yields([(a, b) for a, b in keys], body_boxes)
         persons.append(
             {
                 "person_id": person_id,
-                "tracks": [{"segment": a, "track_id": b} for a, b in keys],
+                "tracks": [
+                    {"segment": a, "track_id": b}
+                    | ({"yields": yields[(a, b)]} if yields[(a, b)] else {})
+                    for a, b in keys
+                ],
                 "segments": sorted({a for a, _ in keys}),
                 "first_frame": min(unit["frames"]) if unit["frames"] else None,
                 "last_frame": max(unit["frames"]) if unit["frames"] else None,
@@ -302,8 +361,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     "face_crops": unit["face_crops"],
                     "body_crops": unit["body_crops"],
                 },
-                # Every merge carries the modality that made it and how far it cleared its threshold,
-                # so a person can be argued with from this file alone.
+                # each merge keeps its modality and margin
                 "links": [
                     {
                         **link,
@@ -325,14 +383,17 @@ def run(cfg: Config) -> dict[str, Any]:
     }
     meta = {
         "video": segmentation["video"],
-        "track_count": len(units) + len(abstained),
+        "track_count": len(tracks),
         "person_count": len(persons),
         "linked_persons": sum(1 for p in persons if p["linked"]),
-        "abstained_tracks": len(abstained),
+        "abstained_tracks": sum(
+            1 for t in tracks if t["face"] is None and t["body"] is None
+        ),
+        "same_face_merges": same_face_merges,
         "within_merges": within_merges,
         "across_merges": across_merges,
-        "face_descriptors": sum(1 for u in units if u["face"] is not None),
-        "body_descriptors": sum(1 for u in units if u["body"] is not None),
+        "face_descriptors": sum(1 for t in tracks if t["face"] is not None),
+        "body_descriptors": sum(1 for t in tracks if t["body"] is not None),
         "thresholds": {
             "face_within": cfg.identity_face_within,
             "face_across": cfg.identity_face_across,
@@ -340,11 +401,21 @@ def run(cfg: Config) -> dict[str, Any]:
             "body_across": cfg.identity_body_across,
             "min_area": cfg.identity_min_area,
             "min_frontality": cfg.identity_min_front,
+            "same_face": {
+                "share": SAME_FACE_SHARE,
+                "frames": SAME_FACE_FRAMES,
+                "iou": SAME_FACE_IOU,
+                "veto": SAME_FACE_VETO,
+                "seated_side": SEATED_SIDE,
+                "seated_top": SEATED_TOP,
+            },
         },
         "source": source,
         "note": (
             "person ids are video-scoped; a track with no usable crop is left unlinked "
-            "rather than assigned to the nearest cluster"
+            "rather than assigned to the nearest cluster; two tracks sharing a frame are one "
+            "person only when boxed twice around one face, and then a track's `yields` are "
+            "the frames the other describes"
         ),
         "persons": persons,
     }

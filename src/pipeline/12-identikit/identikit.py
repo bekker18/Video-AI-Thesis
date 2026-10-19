@@ -14,7 +14,7 @@ from config import Config
 STAGE = "12-identikit"
 INPUTS = ("aggregated.json", "relations.json", "identity.json", "profile.json")
 
-# 07 scores attributes one at a time, so a person can rank high on both halves of a pair.
+# 07 scores each attribute alone, so a person can rank high on both of a pair
 EXCLUSIVE: tuple[tuple[str, ...], ...] = (
     ("a person with a beard", "a clean-shaven person"),
     ("a person with a moustache", "a clean-shaven person"),
@@ -39,7 +39,7 @@ CONTRADICTS = {
     frozenset(pair) for group in EXCLUSIVE for pair in itertools.combinations(group, 2)
 }
 
-# Banded on how many 03 saw at once, not how many 08 followed: crowdedness describes the frame.
+# on how many 03 saw at once, not how many 08 followed
 CROWD = ((0, "none"), (1, "single"), (2, "couple"), (5, "group"))
 
 # Shot scale on the median largest face, else body, height; first match wins, else "extreme long".
@@ -113,7 +113,7 @@ PROVENANCE: dict[str, str] = {
     "figurative.video.indoor_outdoor": "05 Places365 with Places365's IO list, via 09, duration-weighted",
     "figurative.video.objects": "06 YOLO11 temporal union, via 09; the classes listed in some segment",
     "figurative.segments[].crowdedness": "03 YOLO11 person count over keyframes",
-    "figurative.persons[].links": "08 ArcFace and YouTu ReID cosine",
+    "figurative.persons[].links": "08 ArcFace and YouTu ReID cosine; same_face: one face box under two body boxes",
     "figurative.persons[].age": "07 FairFace ResNet-34, 9 age brackets, on face crops clearing 08's floors, via 09",
     "figurative.persons[].gender": "07 FairFace ResNet-34 on face crops clearing 08's floors, via 09",
     "figurative.persons[].attributes": "07 MobileCLIP zero-shot, via 09",
@@ -891,7 +891,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "reduction": round(1 - size / inputs, 3) if inputs else 0.0,
     }
 
-    # Compact: indentation doubled the file; pretty-print it to read by hand.
+    # compact: indentation doubled the file
     (cfg.out_root / "identikit.json").write_text(
         json.dumps(record, separators=(",", ":")), encoding="utf-8"
     )

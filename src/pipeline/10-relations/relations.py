@@ -209,7 +209,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 int(s["frame"]): s for s in track["series"]
             }
 
-    # One table per person; frames cannot collide, as 08 never links tracks sharing one.
+    # One table per person, without each track's `yields` from 08
     person_rows: dict[int, dict[int, dict[str, Any]]] = {}
     person_series: dict[int, dict[int, dict[str, Any]]] = {}
     segment_of: dict[int, dict[int, int]] = {}
@@ -220,9 +220,13 @@ def run(cfg: Config) -> dict[str, Any]:
         segment_of[pid] = {}
         for track in person["tracks"]:
             key = (int(track["segment"]), int(track["track_id"]))
-            person_rows[pid].update(rows.get(key, {}))
-            person_series[pid].update(series.get(key, {}))
-            for frame in rows.get(key, {}):
+            skip = set(track.get("yields", []))
+            held = {f: r for f, r in rows.get(key, {}).items() if f not in skip}
+            person_rows[pid].update(held)
+            person_series[pid].update(
+                {f: s for f, s in series.get(key, {}).items() if f not in skip}
+            )
+            for frame in held:
                 segment_of[pid][frame] = key[0]
 
     heads: dict[int, dict[int, Head]] = {}
