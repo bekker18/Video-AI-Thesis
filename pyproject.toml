@@ -28,7 +28,10 @@ dependencies = [
     # 07-conditional-experts
     "mediapipe>=0.10.14,<0.10.30",
     "onnxruntime>=1.17,<2",
-    "scikit-learn==1.6.1",  # only because Gaze-LLE's utils import it at load
+    "scikit-learn==1.6.1",  # Gaze-LLE's utils import it at load; also src/score/similarity.py
+
+    # src/score/similarity.py
+    "scipy==1.15.3",
 
     # src/tools/preview.py
     "matplotlib==3.10.9",

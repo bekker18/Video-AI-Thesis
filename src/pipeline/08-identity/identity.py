@@ -17,11 +17,12 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 Key: TypeAlias = tuple[int, int]  # (segment, track_id)
 
+FACE_VETO = 0.26  # same-person face cosine, 1st percentile; faces under it never link
+
 # One person boxed twice, set on the reels (STATE.md, One person tracked twice)
 SAME_FACE_SHARE = 0.8
 SAME_FACE_FRAMES = 2
 SAME_FACE_IOU = 0.5
-SAME_FACE_VETO = 0.26  # same-person face cosine, 1st percentile
 SEATED_SIDE = 0.25  # face centre off the body midline, in box widths
 SEATED_TOP = 0.5  # face centre in this top share of the body box
 
@@ -72,6 +73,8 @@ def _link(
     a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
 ) -> dict[str, Any] | None:
     """The best modality clearing its own threshold; one only a track has is no evidence."""
+    if _faces_disagree(a, b):
+        return None
     best: dict[str, Any] | None = None
     for kind, floor in (("face", face_min), ("body", body_min)):
         left, right = a[kind], b[kind]
@@ -88,6 +91,12 @@ def _link(
                 "margin": round(similarity - floor, 4),
             }
     return best
+
+
+def _faces_disagree(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    if a["face"] is None or b["face"] is None:
+        return False
+    return float(a["face"] @ b["face"]) < FACE_VETO
 
 
 def _area(box: list[int]) -> int:
@@ -131,11 +140,7 @@ def _same_face(
     )
     if same < SAME_FACE_FRAMES or same < SAME_FACE_SHARE * len(both):
         return None
-    if (
-        a["face"] is not None
-        and b["face"] is not None
-        and float(a["face"] @ b["face"]) < SAME_FACE_VETO
-    ):
+    if _faces_disagree(a, b):
         return None
     share = same / len(both)
     return {
@@ -401,11 +406,11 @@ def run(cfg: Config) -> dict[str, Any]:
             "body_across": cfg.identity_body_across,
             "min_area": cfg.identity_min_area,
             "min_frontality": cfg.identity_min_front,
+            "face_veto": FACE_VETO,
             "same_face": {
                 "share": SAME_FACE_SHARE,
                 "frames": SAME_FACE_FRAMES,
                 "iou": SAME_FACE_IOU,
-                "veto": SAME_FACE_VETO,
                 "seated_side": SEATED_SIDE,
                 "seated_top": SEATED_TOP,
             },
@@ -413,7 +418,8 @@ def run(cfg: Config) -> dict[str, Any]:
         "source": source,
         "note": (
             "person ids are video-scoped; a track with no usable crop is left unlinked "
-            "rather than assigned to the nearest cluster; two tracks sharing a frame are one "
+            "rather than assigned to the nearest cluster; two tracks whose faces score under "
+            "face_veto are never linked; two tracks sharing a frame are one "
             "person only when boxed twice around one face, and then a track's `yields` are "
             "the frames the other describes"
         ),
