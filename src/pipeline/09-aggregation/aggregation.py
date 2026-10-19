@@ -254,6 +254,20 @@ def _by_segment(
     return out
 
 
+def _held(span: dict[str, Any], skip: set[int]) -> dict[str, Any]:
+    """A track's span without its yielded frames."""
+    if not skip:
+        return span
+    observed = sum(
+        1 for r in span["frames"] if not r["interpolated"] and int(r["frame"]) in skip
+    )
+    return {
+        **span,
+        "frame_count": int(span["frame_count"]) - len(skip),
+        "observed_frames": int(span["observed_frames"]) - observed,
+    }
+
+
 def _person(
     person: dict[str, Any],
     series: list[dict[str, Any]],
@@ -473,8 +487,7 @@ def _things(keyframes: list[dict[str, Any]], top: int) -> dict[str, Any]:
 
 
 def _text(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Readings per shot, near-identical ones grouped under the most frequent: the CRNN reads
-    one caption slightly differently on every keyframe."""
+    """Readings per shot, near-identical ones grouped under the most frequent."""
     frames: dict[str, list[int]] = {}
     for entry in entries:
         frames.setdefault(str(entry["text"]), []).append(int(entry["frame"]))
@@ -763,8 +776,13 @@ def run(cfg: Config) -> dict[str, Any]:
         present = [k for k in keys if k in spans]
         if not present:
             continue
+        # frames another track of the person describes, from 08
+        yields = {
+            (int(t["segment"]), int(t["track_id"])): set(t.get("yields", []))
+            for t in person["tracks"]
+        }
 
-        # Samples keep their segment: movement and the per-segment breakdown need it.
+        # samples keep their segment, for movement and by_segment
         series: list[dict[str, Any]] = []
         attrs: dict[str, list[Any]] = {
             "embedding_rows": [],
@@ -772,18 +790,34 @@ def run(cfg: Config) -> dict[str, Any]:
             "fairface": [],
             "clip": [],
         }
-        crops: dict[
-            int, tuple[int, dict[str, Any]]
-        ] = {}  # frames are unique within a person
+        crops: dict[int, tuple[int, dict[str, Any]]] = {}  # one per frame
         for key in present:
+            skip = yields[key]
             crops.update(
-                {int(c["frame"]): (key[0], c) for c in spans[key]["crops"]["face"]}
+                {
+                    int(c["frame"]): (key[0], c)
+                    for c in spans[key]["crops"]["face"]
+                    if int(c["frame"]) not in skip
+                }
             )
             source = tracks_by_key.get(key)
             if source is None:
                 continue
-            series += [{**sample, "segment": key[0]} for sample in source["series"]]
-            for field, values in source.get("attributes", {}).items():
+            series += [
+                {**sample, "segment": key[0]}
+                for sample in source["series"]
+                if int(sample["frame"]) not in skip
+            ]
+            attributes = source.get("attributes", {})
+            kept = [
+                int(r["frame"]) not in skip
+                for r in attributes.get("embedding_rows", [])
+            ]
+            for field, values in attributes.items():
+                if field == "clip":  # one entry per embedding row, in its order
+                    values = [v for v, keep in zip(values, kept) if keep]
+                else:
+                    values = [v for v in values if int(v["frame"]) not in skip]
                 attrs.setdefault(field, []).extend(values)
         series.sort(key=lambda s: (int(s["segment"]), int(s["frame"])))
         everyone += series
@@ -791,7 +825,7 @@ def run(cfg: Config) -> dict[str, Any]:
         record = _person(
             person,
             series,
-            [(k[0], spans[k]) for k in present],
+            [(k[0], _held(spans[k], yields[k])) for k in present],
             attrs,
             crops,
             live,
