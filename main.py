@@ -10,8 +10,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Protocol, cast
 
-from src.tools import download_models
 from config import Config
+from src.tools import download_models
 
 ROOT = Path(__file__).resolve().parent
 

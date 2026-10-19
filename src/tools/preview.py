@@ -507,6 +507,12 @@ def _relations_view(root: Path) -> Draw:
     shot_of = _shot_map(tracks)
     rows = _rows(tracks)
     owned = _person_tracks(aggregated)
+    # A person boxed twice: 08 names the track that describes each shared frame, as in 09 and 10.
+    yielded = {
+        (int(t["segment"]), int(t["track_id"])): set(t.get("yields", []))
+        for p in aggregated["persons"]
+        for t in p["tracks"]
+    }
     here_in = {
         int(s["index"]): [int(p) for p in s["person_ids"]] for s in relations["shots"]
     }
@@ -525,6 +531,7 @@ def _relations_view(root: Path) -> Draw:
                 (frame, rows[(*key, frame)]["face"], gaze)
                 for key in keys
                 for frame, gaze in gazes.get(key, {}).items()
+                if frame not in yielded[key]
             ),
             key=lambda item: item[0],
         )
@@ -534,7 +541,7 @@ def _relations_view(root: Path) -> Draw:
     def row_at(pid: int, index: int) -> dict[str, Any] | None:
         for shot, tid in owned.get(pid, []):
             found = rows.get((shot, tid, index))
-            if found is not None:
+            if found is not None and index not in yielded[(shot, tid)]:
                 return found
         return None
 
@@ -549,7 +556,7 @@ def _relations_view(root: Path) -> Draw:
     owner = {key: pid for pid, keys in owned.items() for key in keys}
     faces_of: dict[int, list[tuple[int, list[int]]]] = {}
     for (s, t, f), r in rows.items():
-        if r["face"] and (s, t) in owner:
+        if r["face"] and (s, t) in owner and f not in yielded[(s, t)]:
             faces_of.setdefault(owner[(s, t)], []).append((f, r["face"]))
     for faces in faces_of.values():
         faces.sort(key=lambda item: item[0])
