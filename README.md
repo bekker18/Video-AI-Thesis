@@ -45,67 +45,70 @@ tracks/          best crops per track  (06)
 
 ## Options
 
-| flag                            | default          | meaning                                                       |
-| ------------------------------- | ---------------- | ------------------------------------------------------------- |
-| `--stages <name> ...`         | all but 01       | run a subset, always in pipeline order; 01 only when named    |
-| `--device cpu\|cuda\|auto`      | `auto`         | where models run                                              |
-| `--fps 5`                     | every frame      | sample rate for 01-sampling                                   |
-| `--width 640`                 | source           | resize frames, keeping aspect ratio                           |
-| `--quality 95`                | `95`           | jpeg quality, 0 (worst) to 100 (best)                         |
-| `--image-format png`          | `jpg`          | frame file format                                             |
-| `--keyframes 3`               | `3`            | representative frames kept per shot                           |
-| `--shot-mode clean_shot`      | `default`      | `clean_shot` drops transitions, keeping only cuts           |
-| `--shot-overlap 30`           | `30`           | frames shared between adjacent detection windows              |
-| `--detector yolo11m`          | `yolo11s`      | object detector: yolo11n/s/m or rtdetr-l                      |
-| `--det-conf 0.4`              | `0.25`         | detection confidence threshold                                |
-| `--face-conf 0.6`             | `0.6`          | face detection confidence threshold                           |
-| `--text-conf 0.5`             | `0.5`          | text region confidence threshold                              |
-| `--scenes 3`                  | `3`            | scene labels kept per shot                                    |
-| `--router-agreement 0.5`      | `0.0`          | soft gate: fraction of a shot's keyframes a flag must hold in |
-| `--map-size 512`              | `512`          | longest side of every dense map written by 05                 |
-| `--seg-model segformer-b1`    | `segformer-b1` | semantic model: segformer-b0/b1/b2                            |
-| `--seg-top 10`                | `10`           | classes or segments kept per keyframe                         |
-| `--tags 15`                   | `15`           | zero-shot tags kept per keyframe                              |
-| `--expert-batch 8`            | `8`            | keyframes per forward pass in 05                              |
-| `--tracker botsort`           | `bytetrack`    | tracker used by 06                                            |
-| `--frame-source frames`       | `video`        | `frames` reads 01-sampling's output instead of decoding     |
-| `--det-stride 1`              | `2`            | detect every Nth frame; the rest are interpolated             |
-| `--track-low-conf 0.1`        | `0.1`          | floor for ByteTrack's second association pass                 |
-| `--track-high-conf 0.25`      | `0.25`         | first association pass takes detections above this            |
-| `--track-new-conf 0.25`       | `0.25`         | a new track starts only above this                            |
-| `--track-buffer 30`           | `30`           | frames a lost track survives before it is dropped             |
-| `--track-match 0.8`           | `0.8`          | IoU distance a match must beat                                |
-| `--track-batch 16`            | `16`           | frames per detector forward pass in 06                        |
-| `--crops 5`                   | `5`            | best crops kept per track, per kind                           |
-| `--crop-pad 0.1`              | `0.1`          | fraction of the box added as margin                           |
-| `--min-track 3`               | `3`            | tracks shorter than this are dropped                          |
-| `--series-stride 2`           | `2`            | observed rows between series samples in 07                    |
-| `--blendshapes 10`            | `10`           | blendshape coefficients kept per sample                       |
-| `--attributes 8`              | `8`            | zero-shot face attributes kept per crop                       |
-| `--pose-threads 8`            | `8`            | pose landmarkers 07 runs in parallel                          |
-| `--identity-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                     |
-| `--identity-face-across 0.45` | `0.45`         | face cosine a link needs across segments                      |
-| `--identity-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                     |
-| `--identity-body-across 0.60` | `0.60`         | body cosine a link needs across segments                      |
-| `--identity-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted       |
-| `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor       |
-| `--agg-top 10`                | `10`           | labels kept per distribution in 09                            |
-| `--pose-vis 0.5`              | `0.5`          | visibility a joint must reach to count in 09                  |
-| `--address-deg 15`            | `15`           | head-pose cone around the camera axis that counts as address  |
-| `--attention-deg 30`          | `30`           | cone width within which a head counts as attending someone    |
-| `--sync-min 5`                | `5`            | shared affect samples a synchrony edge needs                  |
-| `--caption-model qwen3-vl-4b` | `qwen3-vl-2b`  | captioner used by 11                                          |
-| `--caption-frames 8`          | `8`            | keyframes shown to the captioner                              |
-| `--caption-size 448`          | `448`          | longest side of each keyframe given to the captioner          |
-| `--identikit-attention 0.5`   | `0.5`          | attention share a relation needs before 12 lists it           |
-| `--identikit-labels 3`        | `3`            | labels kept per segment and per person in the identikit       |
+| flag                            | default          | meaning                                                               |
+| ------------------------------- | ---------------- | --------------------------------------------------------------------- |
+| `--stages <name> ...`         | all but 01       | run a subset, always in pipeline order; 01 only when named            |
+| `--device cpu\|cuda\|auto`      | `auto`         | where models run                                                      |
+| `--fps 5`                     | every frame      | sample rate for 01-sampling                                           |
+| `--width 640`                 | source           | resize frames, keeping aspect ratio                                   |
+| `--quality 95`                | `95`           | jpeg quality, 0 (worst) to 100 (best)                                 |
+| `--image-format png`          | `jpg`          | frame file format                                                     |
+| `--keyframes 3`               | `3`            | representative frames kept per shot                                   |
+| `--shot-mode clean_shot`      | `default`      | `clean_shot` drops transitions, keeping only cuts                   |
+| `--shot-overlap 30`           | `30`           | frames shared between adjacent detection windows                      |
+| `--detector yolo11m`          | `yolo11s`      | object detector: yolo11n/s/m or rtdetr-l                              |
+| `--det-conf 0.4`              | `0.25`         | detection confidence threshold                                        |
+| `--face-conf 0.6`             | `0.6`          | face detection confidence threshold                                   |
+| `--text-conf 0.5`             | `0.5`          | text region confidence threshold                                      |
+| `--scenes 3`                  | `3`            | scene labels kept per shot                                            |
+| `--router-agreement 0.5`      | `0.0`          | soft gate: fraction of a shot's keyframes a flag must hold in         |
+| `--map-size 512`              | `512`          | longest side of every dense map written by 05                         |
+| `--seg-model segformer-b1`    | `segformer-b1` | semantic model: segformer-b0/b1/b2                                    |
+| `--seg-top 10`                | `10`           | classes or segments kept per keyframe                                 |
+| `--tags 15`                   | `15`           | zero-shot tags kept per keyframe                                      |
+| `--expert-batch 8`            | `8`            | keyframes per forward pass in 05                                      |
+| `--tracker botsort`           | `bytetrack`    | tracker used by 06                                                    |
+| `--frame-source frames`       | `video`        | `frames` reads 01-sampling's output instead of decoding             |
+| `--det-stride 1`              | `2`            | detect every Nth frame; the rest are interpolated                     |
+| `--track-low-conf 0.1`        | `0.1`          | floor for ByteTrack's second association pass                         |
+| `--track-high-conf 0.25`      | `0.25`         | first association pass takes detections above this                    |
+| `--track-new-conf 0.25`       | `0.25`         | a new track starts only above this                                    |
+| `--track-buffer 30`           | `30`           | frames a lost track survives before it is dropped                     |
+| `--track-match 0.8`           | `0.8`          | IoU distance a match must beat                                        |
+| `--track-batch 16`            | `16`           | frames per detector forward pass in 06                                |
+| `--crops 5`                   | `5`            | best crops kept per track, per kind                                   |
+| `--crop-pad 0.1`              | `0.1`          | fraction of the box added as margin                                   |
+| `--min-track 3`               | `3`            | tracks shorter than this are dropped                                  |
+| `--series-stride 2`           | `2`            | observed rows between series samples in 07                            |
+| `--blendshapes 10`            | `10`           | blendshape coefficients kept per sample                               |
+| `--attributes 8`              | `8`            | zero-shot face attributes kept per crop                               |
+| `--pose-threads 8`            | `8`            | pose landmarkers 07 runs in parallel                                  |
+| `--identity-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                             |
+| `--identity-face-across 0.45` | `0.45`         | face cosine a link needs across segments                              |
+| `--identity-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                             |
+| `--identity-body-across 0.60` | `0.60`         | body cosine a link needs across segments                              |
+| `--identity-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted               |
+| `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor               |
+| `--agg-top 10`                | `10`           | labels kept per distribution in 09                                    |
+| `--pose-vis 0.5`              | `0.5`          | visibility a joint must reach to count in 09                          |
+| `--address-deg 15`            | `15`           | head-pose cone around the camera axis that counts as address          |
+| `--sync-min 5`                | `5`            | shared affect samples a synchrony edge needs                          |
+| `--caption-model qwen3-vl-4b` | `qwen3-vl-2b`  | captioner used by 11                                                  |
+| `--caption-frames 8`          | `8`            | keyframes shown to the captioner                                      |
+| `--caption-size 448`          | `448`          | longest side of each keyframe given to the captioner                  |
+| `--relation-share 0.5`        | `0.5`          | share of one's gaze samples on the other before 12 lists a relation   |
+| `--relation-min 3`            | `3`            | gaze samples that share must rest on                                  |
+| `--identikit-labels 3`        | `3`            | labels kept per segment and per person in the identikit               |
 | `--subject-min 0.25`          | `0.25`         | share of a segment's detection frames an animal needs to be a subject |
+| `--object-min 0.1`            | `0.1`          | share of a segment's detection frames an object needs to be listed    |
+| `--object-frames 3`           | `3`            | detection frames an object needs to be listed                         |
 
 ## The identikit
 
 `12-identikit` writes `data/processed/<video>/identikit.json`: the video's plastic, figurative
 and enunciative levels under a shared timeline, one record per person, the relations between
-them, where each field came from.
+them, where each field came from. It is written compact; `python -m json.tool identikit.json`
+prints it indented.
 
 ## Preview the output
 
@@ -114,21 +117,23 @@ identikit as a page.
 
 ```bash
 # all views
-docker compose run --rm --entrypoint python3 pipeline preview.py messi
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview messi
 
 # just one
-docker compose run --rm --entrypoint python3 pipeline preview.py messi --views relations
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview messi --views relations
 ```
 
-Writes `data/processed/<video>/previews/<view>_preview.mp4`, and `identikit.png` for the page.
+Writes `data/processed/<video>/previews/<view>_preview.mp4`, `identikit.png` for the page, and
+`similarity.png` when `--views similarity` is named.
 
-| view            | shows                                                                                                                  |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `tracks`      | 06 — person boxes, solid where detected and dashed where interpolated, faces in white, and the frames chosen as crops |
-| `conditional` | 07 — pose skeleton, head-pose axes, emotion with valence/arousal, recognised text                                     |
-| `identity`    | 08 — global person ids over the same boxes as`tracks`, so what merged is visible against it                         |
-| `relations`   | 10 — the relation graph: amber attends, green mutual, cyan dashed synchrony                                           |
+| view            | shows                                                                                                                   |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `tracks`      | 06 — person boxes, solid where detected and dashed where interpolated, faces in white, and the frames chosen as crops  |
+| `conditional` | 07 — pose skeleton, head-pose axes, gaze line to its point (or "out"), emotion with valence/arousal, recognised text   |
+| `identity`    | 08 — global person ids over the same boxes as`tracks`, so what merged is visible against it                          |
+| `relations`   | 10 — white: where each gaze lands; grey: the heads it can land on, a line down the box for someone without a face; amber where, in this segment, half a person's looks are aimed at the other's head; green both ways; cyan synchrony |
 | `identikit`   | 12 — the identikit as one page: timeline, plastic, figurative and enunciative levels, and what could not be determined |
+| `similarity`  | the score's ranking, after FRESCO's Figure 11: the video, then its 8 nearest, median and farthest by each level. Only when named, after `python3 -m src.score.similarity` |
 
 ## Download model weights
 
@@ -136,7 +141,7 @@ Runs automatically before each stage; anything already in `models/` is reused.
 To prefetch everything up front:
 
 ```bash
-docker compose run --rm --entrypoint python3 pipeline download_models.py
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_models
 ```
 
 ## AVE dataset
@@ -146,5 +151,77 @@ into `data/raw/ave/`. Videos come from YouTube; deleted or region-blocked ones a
 and listed in `unavailable.txt`.
 
 ```bash
-docker compose run --rm --entrypoint python3 pipeline download_ave.py --count 200
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave --count 200
+```
+
+## Validate on AVE
+
+Each scene runs in two passes: pass 1 is the cheap shot and presence stages, pass 2 the rest
+of the pipeline without the caption. `evaluate_ave.py` then scores every processed AVE scene
+against AVE's per-shot labels and writes a report. In Git Bash, run
+`export MSYS_NO_PATHCONV=1` first, or the `/app/...` path is rewritten.
+
+```bash
+# pass 1, per scene: shots, keyframes, people/face/text flags (camera movement is in pass 2, 09)
+docker compose run --rm -T pipeline data/raw/ave/<id>.mp4 --stages 02-segmentation 03-profiler
+
+# pass 2, per scene; --series-stride 8 is faster, with fewer emotion and gaze samples
+docker compose run --rm -T pipeline data/raw/ave/<id>.mp4 --series-stride 8 --stages \
+  04-router 05-global-experts 06-detection-tracking 07-conditional-experts \
+  08-identity 09-aggregation 10-relations 12-identikit
+
+# score, naming the report by pass and date
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py \
+  --out /app/data/validation/ave_pass1_YYYY-MM-DD.json
+```
+
+To run a pass over every scene, loop over the videos:
+
+```bash
+for v in data/raw/ave/*.mp4; do docker compose run --rm -T pipeline "$v" --stages 02-segmentation 03-profiler; done
+```
+
+`--iou` (0.5) sets the overlap a pipeline shot needs to be compared with an AVE shot, and
+`--tolerance` (2) how many frames a detected cut may be off.
+
+## Distributions
+
+Our version of FRESCO's Figures 9 and 10: every identikit field's distribution for the AVE scenes
+(`data/processed/ave_processed`) and the reels (`data/processed/reels`), with the test clips
+(`data/processed/tests`) as marks, and expectations about them checked against intervals from resampled
+videos. Beside the report it draws three pages: the verdicts (`.png`), the numeric fields (`_numeric.png`)
+and the categorical ones (`_categorical.png`).
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py \
+  --out data/validation/distributions/distributions_YYYY-MM-DD.json
+```
+
+## Looks on UCO-LAEO
+
+Scores 10's `looks_at` rule against [UCO-LAEO](https://uco.es/investiga/grupos/ava/?p=941)'s pairs
+of people looking at each other, sweeping its in-frame cutoff and angle on the non-test videos.
+07's Gaze-LLE output is cached beside the report (about 25 minutes on the GPU the first time), so a
+rerun only rescores.
+
+```bash
+mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py \
+  --out /app/data/validation/laeo_YYYY-MM-DD.json
+```
+
+## Similarity between videos
+
+A FRESCO-style distance between every pair of processed videos, from their `identikit.json` files
+only: one distance per field, calibrated over the collection, averaged per plastic, figurative and
+enunciative level. In tags, places, objects and animals a label counts more the fewer videos carry
+it. It lists each video's nearest, k-medoids clusters with what each shares, and can break one pair
+down field by field. Runs in seconds, on the host or in the container.
+
+```bash
+# every video folder directly under --processed, or name some; writes data/score/similarity.json
+python3 -m src.score.similarity --processed data/processed/ave_processed
+python3 -m src.score.similarity --processed data/processed/tests --clusters 3 --explain messi anime
+# one video's nearest, median and farthest per level, as a page (FRESCO's Figure 11)
+python3 -m src.tools.preview ave_processed/6bxEuaulT4k --views similarity
 ```
