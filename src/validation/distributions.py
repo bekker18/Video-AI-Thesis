@@ -24,7 +24,7 @@ Video: TypeAlias = dict[str, Any]  # name, kit, tall, bars
 Reader: TypeAlias = Callable[[Video], list[float]]
 Mixer: TypeAlias = Callable[[Video], dict[str, float]]
 
-AVE, REELS = COLLECTIONS = ("ave_processed", "reels")
+AVE, REELS = COLLECTIONS = ("ave", "reels")
 KNOWN = "tests"  # clips of known content
 NAMES = {AVE: "AVE film scenes", REELS: "Instagram reels", KNOWN: "test clips"}
 MIN_N = 20  # videos, or persons for a top check, needed to judge
@@ -67,12 +67,17 @@ GROUPS = (
 )
 
 
-def _bars(gray: Array) -> float:
-    """Share of the height in black rows at top and bottom."""
-    lit = np.flatnonzero(gray.mean(axis=1) >= DARK)
+def _edges(means: Array) -> float:
+    """Share of the lines that are black at either end."""
+    lit = np.flatnonzero(means >= DARK)
     if not len(lit):
         return 1.0
-    return float(lit[0] + len(gray) - 1 - lit[-1]) / len(gray)
+    return float(lit[0] + len(means) - 1 - lit[-1]) / len(means)
+
+
+def _bars(gray: Array) -> float:
+    """Black bars, top and bottom or left and right: the larger share."""
+    return max(_edges(gray.mean(axis=1)), _edges(gray.mean(axis=0)))
 
 
 def _video(root: Path) -> Video:
@@ -216,6 +221,15 @@ def _face_height(v: Video) -> list[float]:
         float(d["face_height"]) * float(v["tall"])
         for s in v["kit"]["enunciative"]["segments"]
         if (d := s.get("camera_distance")) and float(d["face_height"]) > 0
+    ]
+
+
+def _face_ratio(v: Video) -> list[float]:
+    """Segments with a face, as for face height: 0 means no face, not a small one."""
+    return [
+        float(x)
+        for s in v["kit"]["enunciative"]["segments"]
+        if (x := s.get("face_background_ratio"))
     ]
 
 
@@ -477,13 +491,7 @@ NUMERIC: tuple[tuple[str, str, str, tuple[float, float] | None, Reader], ...] = 
         (0.0, 1.0),
         _face_height,
     ),
-    (
-        "face to background ratio",
-        "enunciative",
-        "segment",
-        None,
-        _each("enunciative", "face_background_ratio"),
-    ),
+    ("face to background ratio", "enunciative", "segment", None, _face_ratio),
     (
         "head yaw (degrees)",
         "enunciative",
@@ -1462,6 +1470,11 @@ def main() -> None:
     )
     p.add_argument("--processed", type=Path, default=ROOT / "data" / "processed")
     p.add_argument(
+        "--ave",
+        default="ave_processed",
+        help="the AVE scenes' folder under --processed",
+    )
+    p.add_argument(
         "--out",
         type=Path,
         default=ROOT / "data" / "validation" / "distributions" / "distributions.json",
@@ -1473,18 +1486,19 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
+    folders = {AVE: args.ave, REELS: REELS, KNOWN: KNOWN}
     videos = {
         c: [
             _video(d)
-            for d in sorted((args.processed / c).iterdir())
+            for d in sorted((args.processed / folder).iterdir())
             if (d / "identikit.json").exists()
         ]
-        for c in (*COLLECTIONS, KNOWN)
-        if (args.processed / c).is_dir()
+        for c, folder in folders.items()
+        if (args.processed / folder).is_dir()
     }
     if any(len(videos.get(c, [])) < MIN_N for c in COLLECTIONS):
         sys.exit(
-            f"needs {MIN_N} processed videos in each of {', '.join(COLLECTIONS)} under {args.processed}"
+            f"needs {MIN_N} processed videos in each of {args.ave}, {REELS} under {args.processed}"
         )
 
     numeric = _numeric(videos)
@@ -1497,6 +1511,7 @@ def main() -> None:
     report = {
         "collections": {
             c: {
+                "folder": folders[c],
                 "videos": len(vs),
                 "minutes": round(
                     sum(float(v["kit"]["summary"]["duration_s"]) for v in vs) / 60, 1
