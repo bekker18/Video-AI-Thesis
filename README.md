@@ -21,10 +21,10 @@ docker compose build
 
 ```bash
 # whole pipeline
-docker compose run --rm pipeline data/raw/messi.mp4
+docker compose run --rm pipeline data/raw/test/messi.mp4
 
 # one module on its own
-docker compose run --rm pipeline data/raw/messi.mp4 --stages 02-segmentation
+docker compose run --rm pipeline data/raw/test/messi.mp4 --stages 02-segmentation
 ```
 
 Output lands in `data/processed/<video_name>/`:
@@ -41,7 +41,9 @@ global/          dense maps per keyframe (05)
 tracks/          best crops per track  (06)
 ```
 
-`json/`, `embeddings/` and `previews/` are created on first use.
+`json/`, `embeddings/` and `previews/` are created on first use. The processed collections
+live one level down, moved there after their runs: `tests/` (the test clips), `ave/` and
+`ave_processed/` (AVE scenes) and `reels/`.
 
 ## Options
 
@@ -116,11 +118,11 @@ Draws what 06, 07, 08 and 10 produced back over the source video, for inspection
 identikit as a page.
 
 ```bash
-# all views
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview messi
+# all views; the name is the folder under data/processed
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi
 
 # just one
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview messi --views relations
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi --views relations
 ```
 
 Writes `data/processed/<video>/previews/<view>_preview.mp4`, `identikit.png` for the page, and
@@ -156,45 +158,68 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave 
 
 ## Validate on AVE
 
-Each scene runs in two passes: pass 1 is the cheap shot and presence stages, pass 2 the rest
-of the pipeline without the caption. `evaluate_ave.py` then scores every processed AVE scene
-against AVE's per-shot labels and writes a report. In Git Bash, run
-`export MSYS_NO_PATHCONV=1` first, or the `/app/...` path is rewritten.
+Run the whole pipeline on each scene, move its output into a collection folder, then score every
+scene in that folder against AVE's per-shot labels. The first 50 scenes through the current pipeline
+are in `data/processed/ave/`; `data/processed/ave_processed/` holds 100 scenes of an earlier run.
 
 ```bash
-# pass 1, per scene: shots, keyframes, people/face/text flags (camera movement is in pass 2, 09)
-docker compose run --rm -T pipeline data/raw/ave/<id>.mp4 --stages 02-segmentation 03-profiler
+# per scene, 02-12 at the defaults; the output lands in data/processed/<id>/ and is moved
+mkdir -p data/processed/ave
+for v in data/raw/ave/*.mp4; do
+  id=$(basename "$v" .mp4)
+  docker compose run --rm -T pipeline "$v" && mv "data/processed/$id" data/processed/ave/
+done
 
-# pass 2, per scene; --series-stride 8 is faster, with fewer emotion and gaze samples
-docker compose run --rm -T pipeline data/raw/ave/<id>.mp4 --series-stride 8 --stages \
-  04-router 05-global-experts 06-detection-tracking 07-conditional-experts \
-  08-identity 09-aggregation 10-relations 12-identikit
-
-# score, naming the report by pass and date
+# score, naming the report by date
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py \
-  --out /app/data/validation/ave_pass1_YYYY-MM-DD.json
-```
-
-To run a pass over every scene, loop over the videos:
-
-```bash
-for v in data/raw/ave/*.mp4; do docker compose run --rm -T pipeline "$v" --stages 02-segmentation 03-profiler; done
+  --processed data/processed/ave --out data/validation/ave_YYYY-MM-DD.json
 ```
 
 `--iou` (0.5) sets the overlap a pipeline shot needs to be compared with an AVE shot, and
-`--tolerance` (2) how many frames a detected cut may be off.
+`--tolerance` (2) how many frames a detected cut may be off. Relative paths, as here, need no
+`MSYS_NO_PATHCONV` in Git Bash; an `/app/...` path does.
 
 ## Distributions
 
 Our version of FRESCO's Figures 9 and 10: every identikit field's distribution for the AVE scenes
-(`data/processed/ave_processed`) and the reels (`data/processed/reels`), with the test clips
-(`data/processed/tests`) as marks, and expectations about them checked against intervals from resampled
-videos. Beside the report it draws three pages: the verdicts (`.png`), the numeric fields (`_numeric.png`)
-and the categorical ones (`_categorical.png`).
+and the reels (`data/processed/reels`), with the test clips (`data/processed/tests`) as marks, and
+expectations about them checked against intervals from resampled videos. `--ave` names the AVE
+folder under `data/processed` (default `ave_processed`; the current reports use `ave`). Beside the
+report it draws three pages: the verdicts (`.png`), the numeric fields (`_numeric.png`) and the
+categorical ones (`_categorical.png`).
 
 ```bash
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py \
-  --out data/validation/distributions/distributions_YYYY-MM-DD.json
+  --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
+```
+
+## Consistency across models
+
+Our version of FRESCO's Tables 3-5, per keyframe of the AVE scenes and the reels: how often each model
+finds a person and how many, group sizes, and the topics their labels share, matched by CLIP ViT-L/14's
+text similarity as in FRESCO and set against chance; plus five checks of two models measuring the
+same thing. Expectations are checked against intervals from resampled videos. `--ave` names the AVE
+folder, as for distributions, and `--encoders` also compares CLIP with the pipeline's MobileCLIP
+into `<report>_encoders.json`. Beside the report it draws five pages (`.png`, `_people`, `_groups`,
+`_topics`, `_agreement`) and caches YuNet's faces on whole keyframes (`faces_yunet.json`) and
+Mask2Former run again with every segment (`things_mask2former.json`); CLIP's weights (1.6 GB) are
+fetched into `models/validation/` on the first run.
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py \
+  --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
+```
+
+## Contrasts on AVE's labels
+
+Groups that AVE's labels tell apart, against the pipeline's values there: exterior shots should
+read more outdoor than interior ones, close-ups should show bigger faces than wide shots, and so on
+for 11 contrasts. Each is an AUC with an interval from resampled scenes, and a planted dead model
+must fail to pass. `--processed` is the AVE folder itself. Beside the report it draws one page.
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py \
+  --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
 ```
 
 ## Looks on UCO-LAEO
@@ -207,7 +232,7 @@ rerun only rescores.
 ```bash
 mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py \
-  --out /app/data/validation/laeo_YYYY-MM-DD.json
+  --out data/validation/laeo_YYYY-MM-DD.json
 ```
 
 ## Similarity between videos
@@ -222,6 +247,7 @@ down field by field. Runs in seconds, on the host or in the container.
 # every video folder directly under --processed, or name some; writes data/score/similarity.json
 python3 -m src.score.similarity --processed data/processed/ave_processed
 python3 -m src.score.similarity --processed data/processed/tests --clusters 3 --explain messi anime
-# one video's nearest, median and farthest per level, as a page (FRESCO's Figure 11)
+# one video's nearest, median and farthest per level, as a page (FRESCO's Figure 11);
+# --score names the report when it is not data/score/similarity.json
 python3 -m src.tools.preview ave_processed/6bxEuaulT4k --views similarity
 ```
