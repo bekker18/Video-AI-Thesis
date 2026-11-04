@@ -40,8 +40,9 @@ MOTION_SIDE = 256  # short side camera motion is measured at
 CORNERS = 200  # tracked per frame pair for camera motion
 MIN_POINTS = 10  # tracked corners a motion estimate needs
 MOTION_THREADS = 4  # frame pairs fitted at once; OpenCV releases the GIL
-SHAKE = 0.00058  # spread of the frame centre's shift per frame, in widths; tuned on AVE
-STILL = 0.0094  # net pan or tilt (widths) or log zoom per second; tuned on AVE
+SHAKE = 0.00309  # spread of the frame centre's shift about its median, in widths, times sqrt(fps)
+STILL = 0.00923  # net pan or tilt (widths) or log zoom per second
+STEADY = 0.605  # a handheld camera is named by its move when the move's mean per pair reaches this share of its sd
 
 Motion: TypeAlias = tuple[float, float, float]  # pan, tilt, log zoom of one frame pair
 
@@ -691,6 +692,11 @@ def _motions(
     return [s.result() for s in steps]
 
 
+def _spread(values: Array) -> float:
+    """Median absolute deviation scaled to a normal's sd: one jump between frames barely moves it."""
+    return 1.4826 * float(np.median(np.abs(values - np.median(values))))
+
+
 def _camera(steps: list[Motion | None], fps: float) -> dict[str, Any]:
     """The rig from the frame centre's shake, the move from its net shift or zoom per second."""
     known = [s for s in steps if s is not None]
@@ -705,7 +711,7 @@ def _camera(steps: list[Motion | None], fps: float) -> dict[str, Any]:
     tx, ty, scale = (np.asarray(v) for v in zip(*known))
     seconds = len(known) / fps
     pan, tilt, zoom = (float(v.sum()) / seconds for v in (tx, ty, scale))
-    jitter = float(tx.std() + ty.std())
+    jitter = (_spread(tx) + _spread(ty)) * math.sqrt(fps)
     rig = "handheld" if jitter > SHAKE else "steady"
     # directions are the camera's: content sliding left is a pan right
     if max(abs(pan), abs(tilt), abs(zoom)) < STILL:
@@ -717,9 +723,12 @@ def _camera(steps: list[Motion | None], fps: float) -> dict[str, Any]:
     else:
         move, direction = "tilt", ("down" if tilt < 0 else "up")
     still = "static" if move == "none" else move
+    axis = {"pan": tx, "tilt": ty, "zoom": scale}.get(move)
+    steady = axis is not None and (
+        float(axis.std()) == 0 or abs(float(axis.mean())) / float(axis.std()) >= STEADY
+    )
     return {
-        # one label, as AVE's: a handheld camera that also pans is handheld
-        "movement": "handheld" if rig == "handheld" else still,
+        "movement": "handheld" if rig == "handheld" and not steady else still,
         "rig": rig,
         "move": move,
         "direction": direction,

@@ -156,7 +156,8 @@ CAVEATS: tuple[str, ...] = (
     "medium separates 2D animation well; photoreal CGI reads as live action",
     "address is the head turned to the lens with the gaze off the frame, not a measured eye contact",
     "camera movement is one similarity per frame pair fitted off detected people, so an animal or "
-    "object filling the frame can still read as a pan; its thresholds were tuned on AVE's 24 fps films",
+    "object filling the frame can still read as a move; its thresholds were tuned on AVE's films, and "
+    "a smooth broadcast or drawn camera can still read as a handheld rig",
     "temperature is the keyframes' mean colour, so grading counts as much as light",
     "subjects are animal classes the detector saw often enough, neither tracked nor told apart",
 )
