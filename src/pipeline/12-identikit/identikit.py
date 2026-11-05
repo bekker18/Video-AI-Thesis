@@ -53,7 +53,7 @@ SCALE: tuple[tuple[str, str, float], ...] = (
 GRAYSCALE = 0.01  # weighted chroma below which a segment reads grayscale
 PORTRAIT = 0.05  # median face area against the rest of the frame, for a portrait
 WARM = 5.0  # mean b* above which a segment reads warm, below its negative cool
-OUTDOOR = 0.5  # mean Places365 outdoor probability from which a segment reads outdoor
+OUTDOOR = 0.168  # mean Places365 outdoor probability from which a segment reads outdoor; the lowest that keeps 95% of AVE scenes 51-100's interiors indoor
 # The values a person's record can show; head pose and gaze are under enunciative.
 MEASURED = (
     "age",
