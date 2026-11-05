@@ -222,6 +222,41 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrast
   --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
 ```
 
+## Tuning camera movement on AVE
+
+09's camera rule and changes to it, against AVE's `shot-motion` labels. `pairs` fits every frame pair
+once, as 09 does, into `data/validation/camera/pairs/` (about 10 minutes; `--stride 2` adds the
+half-frame-rate copy the fps check needs). `evaluate` fits each rule on AVE scenes 51-100 and scores
+scenes 1-50, the ones in `data/processed/ave`. `reproduce` checks the cache against 09's stored
+cameras, `sheets` draws the fitted rule's errors and `clips` the test clips under each rule.
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave --stride 2
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py evaluate \
+  --out data/validation/camera/camera_YYYY-MM-DD.json
+```
+
+## Camera movement on CameraBench
+
+Scores 09's camera rule, as tuned on AVE, on [CameraBench](https://github.com/sy77777en/CameraBench)'s
+1,071 test clips with the benchmark's own scorer, against the methods its paper reports. The download
+(4.4 GB, pinned, about 25 minutes) goes to `data/raw/camerabench/`. `gate` first checks that the box
+and fit code gives 06's and 09's own output on the test clips. `shots` finds cuts with 02's
+OmniShotCut (about 20 minutes), `boxes` tracks people with 06's code on every shot (12), `pairs` fits
+every frame pair with and without the person mask (8), and `score` writes the 15 official score files
+and the report; `roll` draws roll clips to check the roll sign by eye.
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_camerabench
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py gate
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py shots
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py boxes
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py pairs
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py score \
+  --out data/validation/camera/camerabench_YYYY-MM-DD.json
+```
+
 ## Looks on UCO-LAEO
 
 Scores 10's `looks_at` rule against [UCO-LAEO](https://uco.es/investiga/grupos/ava/?p=941)'s pairs
