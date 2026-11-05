@@ -220,7 +220,7 @@ def _face_height(v: Video) -> list[float]:
     return [
         float(d["face_height"]) * float(v["tall"])
         for s in v["kit"]["enunciative"]["segments"]
-        if (d := s.get("camera_distance")) and float(d["face_height"]) > 0
+        if (d := s.get("camera_distance")) and float(d.get("face_height") or 0) > 0
     ]
 
 
@@ -584,8 +584,16 @@ CATEGORICAL: tuple[tuple[str, str, tuple[str, ...], Mixer, bool], ...] = (
     ),
     (
         "shot scale",
-        "share of running time with someone followed",
-        ("extreme close-up", "close-up", "medium", "long", "extreme long"),
+        "share of running time; MobileCLIP's size where nobody is followed",
+        (
+            "extreme close-up",
+            "close-up",
+            "medium close-up",
+            "medium",
+            "medium long",
+            "long",
+            "extreme long",
+        ),
         _mix_time("enunciative", "camera_distance", "scale"),
         False,
     ),

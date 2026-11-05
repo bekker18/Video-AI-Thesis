@@ -34,6 +34,8 @@ SIZE = {
     "close-up": "close-up",
     "extreme-close-up": "extreme close-up",
 }
+# 12's two in-between sizes, which AVE counts as medium
+TO_AVE_SIZE = {"medium close-up": "medium", "medium long": "medium"}
 LOCATION = {"int": "indoor", "ext": "outdoor"}
 PEOPLE = {"0": "0", "1": "1", "2": "2", "3": "3", "4": "4", "5": "5+"}
 SHOT_TYPE = {
@@ -410,7 +412,9 @@ def main() -> None:
                 rows["shot_size"].append(
                     (
                         _values(label, "shot-size", SIZE),
-                        distance["scale"] if distance else None,
+                        TO_AVE_SIZE.get(distance["scale"], distance["scale"])
+                        if distance
+                        else None,
                     )
                 )
             if index in figurative:

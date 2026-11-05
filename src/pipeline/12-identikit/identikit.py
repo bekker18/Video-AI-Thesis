@@ -9,10 +9,19 @@ import statistics
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from config import Config
 
 STAGE = "12-identikit"
-INPUTS = ("aggregated.json", "relations.json", "identity.json", "profile.json")
+INPUTS = (
+    "aggregated.json",
+    "relations.json",
+    "identity.json",
+    "profile.json",
+    "tracks.json",
+    "conditional.json",
+)
 
 # 07 scores each attribute alone, so a person can rank high on both of a pair
 EXCLUSIVE: tuple[tuple[str, ...], ...] = (
@@ -42,13 +51,46 @@ CONTRADICTS = {
 # on how many 03 saw at once, not how many 08 followed
 CROWD = ((0, "none"), (1, "single"), (2, "couple"), (5, "group"))
 
-# Shot scale on the median largest face, else body, height; first match wins, else "extreme long".
-SCALE: tuple[tuple[str, str, float], ...] = (
-    ("extreme close-up", "face_height", 0.75),
-    ("close-up", "face_height", 0.30),
-    ("medium", "face_height", 0.12),
-    ("medium", "body_height", 0.75),
-    ("long", "body_height", 0.25),
+# Shot size, fitted on AVE scenes 51-100 (2026-11-05): the median largest face height first, then where the
+# frame cuts the largest followed body (07's pose landmarks), then face and body heights; with nobody
+# followed, MobileCLIP's nearest size. Medium long is cinematography's medium wide.
+SIZES = (
+    "extreme close-up",
+    "close-up",
+    "medium close-up",
+    "medium",
+    "medium long",
+    "long",
+    "extreme long",
+)
+EXTREME_CLOSE = 0.75  # face height
+CLOSE = 0.33  # face height
+MEDIUM_FACE = 0.125  # face height
+MEDIUM_BODY = 1.0  # body height, where neither a face nor the body cut decides
+LONG = 0.25  # body height; below it extreme long
+VISIBLE = 0.3  # pose landmark visibility from which a body part counts as in frame
+# MediaPipe's landmarks, top to bottom: face, shoulders, elbows, hips, knees, ankles and feet
+BODY_PARTS = (
+    tuple(range(11)),
+    (11, 12),
+    (13, 14),
+    (23, 24),
+    (25, 26),
+    (27, 28, 29, 30, 31, 32),
+)
+CUT = (1, 2, 3, 4, 4, 5)  # the lowest part in frame -> index into SIZES
+CLIP_MODEL = "hf-hub:apple/MobileCLIP-S2-OpenCLIP"  # 02's keyframe embedder
+SIZE_PROMPTS = tuple(  # as fitted; wide is long here
+    (f"a film still: {n} shot", f"a {n} shot of a scene")
+    for n in (
+        "extreme close-up",
+        "close-up",
+        "medium close-up",
+        "medium",
+        "medium wide",
+        "wide",
+        "extreme wide",
+    )
 )
 GRAYSCALE = 0.01  # weighted chroma below which a segment reads grayscale
 PORTRAIT = 0.05  # median face area against the rest of the frame, for a portrait
@@ -128,7 +170,10 @@ PROVENANCE: dict[str, str] = {
     "enunciative.persons[].gaze": "07 Gaze-LLE with DINOv2 ViT-B on the frame and head box, via 09",
     "enunciative.segments[].visible_at_once": "03 YOLO11 person count over keyframes",
     "enunciative.segments[].followed": "08 person ids, via 09",
-    "enunciative.segments[].camera_distance": "06 YuNet face and YOLO11 body boxes, via 09",
+    "enunciative.segments[].camera_distance": (
+        "06 YuNet face and YOLO11 body boxes via 09, and 07 MediaPipe pose landmarks; with nobody followed, "
+        "02's MobileCLIP keyframe embeddings against SIZE_PROMPTS"
+    ),
     "enunciative.segments[].face_background_ratio": "06 YuNet face boxes, via 09",
     "enunciative.segments[].portrait_scene": "face_background_ratio against PORTRAIT",
 }
@@ -144,7 +189,8 @@ CAVEATS: tuple[str, ...] = (
     "a person; they are read on face crops that clear 08's floors",
     "text is read by a CRNN in ten-character chunks, so word boundaries are not real",
     "visible_at_once is the maximum over a segment's keyframes, so it is itself a lower bound",
-    "camera_distance is a shot scale from the largest followed person, not a distance; faces YuNet misses read as wider shots",
+    "camera_distance is a shot size from the largest followed person, not a distance, its cut-offs fitted on AVE's "
+    "films; faces YuNet misses read as wider shots, and with nobody followed it is MobileCLIP's nearest size",
     "a person's confidence is banded on the median samples behind their values, good from 10, "
     "moderate from 3; a glimpsed person's every value rests on one sample",
     "a relation is listed when, in some segment, --relation-share of one person's looks on "
@@ -526,21 +572,166 @@ def _indoor_outdoor(plastic: dict[str, Any]) -> dict[str, Any] | None:
     return {**_io(float(stats["mean"])), "n": stats["n"]}
 
 
-def _framing(framing: dict[str, Any]) -> dict[str, Any]:
-    """Null where nobody was followed: there is no one to frame."""
+def _parts(
+    points: list[list[float]], box: list[int], size: tuple[int, int]
+) -> list[float]:
+    """Per body part, the best visibility among its landmarks inside the frame; 07's crop is the body box."""
+    width, height = size
+    x1, y1 = max(0, box[0]), max(0, box[1])
+    x2, y2 = min(width, box[2]), min(height, box[3])
+    return [
+        round(
+            float(
+                max(
+                    (
+                        points[i][2]
+                        for i in part
+                        if 0 <= x1 + points[i][0] * (x2 - x1) < width
+                        and 0 <= y1 + points[i][1] * (y2 - y1) < height
+                    ),
+                    default=0.0,
+                )
+            ),
+            3,
+        )
+        for part in BODY_PARTS
+    ]
+
+
+def _cut(samples: list[list[float]]) -> int | None:
+    """The lowest body part in frame, the lower median over the person's samples."""
+    levels = sorted(
+        next((g for g in range(len(BODY_PARTS) - 1, -1, -1) if s[g] >= VISIBLE), -1)
+        for s in samples
+    )
+    levels = [x for x in levels if x >= 0]
+    return levels[(len(levels) - 1) // 2] if levels else None
+
+
+def _size(face: float, body: float, samples: list[list[float]]) -> tuple[int, str]:
+    """An index into SIZES, and the measure that decided it."""
+    if face >= EXTREME_CLOSE:
+        return 0, "face"
+    if face >= CLOSE:
+        return 1, "face"
+    cut = _cut(samples)
+    if cut is not None:
+        found = CUT[cut]
+        return (6 if found == 5 and body < LONG else found), "body cut"
+    if face >= MEDIUM_FACE:
+        return 3, "face"
+    if body >= MEDIUM_BODY:
+        return 3, "body"
+    return (5 if body >= LONG else 6), "body"
+
+
+def _body_samples(
+    tracks: dict[str, Any], conditional: dict[str, Any], size: tuple[int, int]
+) -> dict[int, list[list[float]]]:
+    """Per segment, the body-part visibilities of its largest followed person over 07's pose samples."""
+    poses = {
+        (int(s["index"]), int(t["track_id"])): [
+            r for r in t.get("series", []) if r.get("pose")
+        ]
+        for s in conditional["shots"]
+        for t in s.get("tracks", [])
+    }
+    out: dict[int, list[list[float]]] = {}
+    for shot in tracks["shots"]:
+        index = int(shot["index"])
+        bodies = {
+            int(t["track_id"]): {
+                int(r["frame"]): r["body"] for r in t["frames"] if not r["interpolated"]
+            }
+            for t in shot.get("tracks", [])
+        }
+        bodies = {k: v for k, v in bodies.items() if v}
+        if not bodies:
+            continue
+        main = max(
+            bodies,
+            key=lambda t: statistics.median(
+                (b[3] - b[1]) / size[1] for b in bodies[t].values()
+            ),
+        )
+        out[index] = [
+            _parts(r["pose"]["keypoints"], bodies[main][int(r["frame"])], size)
+            for r in poses.get((index, main), [])
+            if int(r["frame"]) in bodies[main]
+        ]
+    return out
+
+
+def _size_texts(model_dir: Path) -> np.ndarray[Any, np.dtype[Any]]:
+    """MobileCLIP's text vector per size, two prompts averaged; encoded once and kept in model_dir."""
+    path = model_dir / "shot_size_texts.npy"
+    if path.exists():
+        cached: np.ndarray[Any, np.dtype[Any]] = np.load(path)
+        return cached
+    import open_clip
+    import torch
+
+    from src.tools import download_models
+
+    cache = str(download_models.stage_dir("02-segmentation"))
+    model, _, _ = open_clip.create_model_and_transforms(CLIP_MODEL, cache_dir=cache)
+    tokenizer = open_clip.get_tokenizer(CLIP_MODEL, cache_dir=cache)
+    with torch.no_grad():
+        text = (
+            model.eval()
+            .encode_text(tokenizer([p for pair in SIZE_PROMPTS for p in pair]))
+            .float()
+        )
+    text = (text / text.norm(dim=-1, keepdim=True)).numpy()
+    centres = text.reshape(len(SIZES), 2, -1).mean(axis=1)
+    centres /= np.linalg.norm(centres, axis=1, keepdims=True)
+    model_dir.mkdir(parents=True, exist_ok=True)
+    np.save(path, centres)
+    return centres
+
+
+def _nearest_sizes(cfg: Config, wanted: set[int]) -> dict[int, int]:
+    """For segments with nobody followed, MobileCLIP's nearest size over 02's keyframe embeddings."""
+    if not wanted:
+        return {}
+    segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
+    embeddings = np.load(cfg.embeddings_dir / "keyframe_embeddings.npy")
+    texts = _size_texts(cfg.model_dir)
+    out: dict[int, int] = {}
+    row = 0
+    for shot in segmentation["shots"]:
+        count = len(shot["keyframes"])
+        if int(shot["index"]) in wanted and count:
+            vector = embeddings[row : row + count].mean(axis=0)
+            out[int(shot["index"])] = int(
+                np.argmax(texts @ (vector / np.linalg.norm(vector)))
+            )
+        row += count
+    return out
+
+
+def _framing(
+    framing: dict[str, Any], samples: list[list[float]], nearest: int | None
+) -> dict[str, Any]:
+    """With nobody followed, MobileCLIP's size and no face ratio: there is no one to frame."""
     if not framing.get("frames"):
         return {
-            "camera_distance": None,
+            "camera_distance": None
+            if nearest is None
+            else {"scale": SIZES[nearest], "from": "MobileCLIP"},
             "face_background_ratio": None,
             "portrait_scene": None,
         }
     medians = {k: float(framing[k]["median"]) for k in ("face_height", "body_height")}
-    scale = next(
-        (label for label, key, floor in SCALE if medians[key] >= floor), "extreme long"
-    )
+    found, source = _size(medians["face_height"], medians["body_height"], samples)
     ratio = float(framing["face_background"]["median"])
     return {
-        "camera_distance": {"scale": scale, **medians, "frames": framing["frames"]},
+        "camera_distance": {
+            "scale": SIZES[found],
+            "from": source,
+            **medians,
+            "frames": framing["frames"],
+        },
         "face_background_ratio": ratio,
         "portrait_scene": "portrait" if ratio >= PORTRAIT else "scene",
     }
@@ -570,6 +761,19 @@ def run(cfg: Config) -> dict[str, Any]:
         raise RuntimeError(
             "aggregated.json predates whole_video; re-run 09-aggregation"
         )
+    samples = _body_samples(
+        _read(cfg.json_dir, "tracks.json", "06-detection-tracking"),
+        _read(cfg.json_dir, "conditional.json", "07-conditional-experts"),
+        tuple(aggregated["frame_size"]),
+    )
+    nearest = _nearest_sizes(
+        cfg,
+        {
+            int(s["index"])
+            for s in aggregated["shots"]
+            if not (s.get("framing") or {}).get("frames")
+        },
+    )
 
     keep = cfg.identikit_labels
     pending, provenance = dict(PENDING), dict(PROVENANCE)
@@ -738,7 +942,11 @@ def run(cfg: Config) -> dict[str, Any]:
                 "visible_at_once": at_once.get(index, 0),
                 "followed": followed,
                 "assessment": _assess(at_once.get(index, 0), followed),
-                **_framing(shot.get("framing") or {}),
+                **_framing(
+                    shot.get("framing") or {},
+                    samples.get(index, []),
+                    nearest.get(index),
+                ),
                 "address": _counted(shot.get("address"), ("share", "n")),
                 "camera": {
                     k: camera.get(k) for k in ("movement", "rig", "move", "direction")
