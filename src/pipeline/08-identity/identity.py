@@ -17,7 +17,8 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 Key: TypeAlias = tuple[int, int]  # (segment, track_id)
 
-FACE_VETO = 0.26  # same-person face cosine, 1st percentile; faces under it never link
+FACE_VETO = 0.331  # faces under it never link; fitted on VPCD, carried over by rate (2026-11-07)
+NEAR = 1  # a body-only link across cuts reaches at most this many segments
 
 # One person boxed twice, set on the reels (STATE.md, One person tracked twice)
 SAME_FACE_SHARE = 0.8
@@ -242,6 +243,258 @@ def _mean(vectors: list[Array | None]) -> Array | None:
     return out
 
 
+def _links(
+    f: Array, b: Array, face_min: float, body_min: float, body_ok: Array | None
+) -> tuple[Array, Array]:
+    """_link on arrays of similarities: the modality clearing its threshold by more, -inf where none does or the
+    faces disagree; and whether that modality is the body."""
+    with np.errstate(invalid="ignore"):
+        has_f, has_b = ~np.isnan(f), ~np.isnan(b)
+        ok_f = has_f & (f >= face_min)
+        ok_b = has_b & (b >= body_min)
+        if body_ok is not None:
+            ok_b &= body_ok
+        by_body = np.where(ok_b, b - body_min, -np.inf) > np.where(
+            ok_f, f - face_min, -np.inf
+        )
+        sim = np.where(
+            (ok_f | ok_b) & ~(has_f & (f < FACE_VETO)), np.where(by_body, b, f), -np.inf
+        )
+    return sim, by_body
+
+
+def _centres(groups: list[list[int]], vectors: Array) -> tuple[Array, Array]:
+    has = ~np.isnan(vectors[:, 0])
+    clean = np.where(has[:, None], vectors, 0.0)
+    sums = np.stack([clean[g].sum(axis=0) for g in groups])
+    return sums, np.array([int(has[g].sum()) for g in groups])
+
+
+def _unit(sums: Array, counts: Array) -> Array:
+    out: Array = sums / np.maximum(np.linalg.norm(sums, axis=-1, keepdims=True), 1e-12)
+    out[counts == 0] = np.nan
+    return out
+
+
+def _average(
+    groups: list[list[int]],
+    found: list[list[dict[str, Any]]],
+    space: dict[str, Any],
+    offered: Array,
+    near: Array | None,
+    face_min: float,
+    body_min: float,
+) -> tuple[list[list[int]], list[list[dict[str, Any]]]]:
+    """Groups merge by the mean of their tracks' vectors, the best link first; a merged group is compared anew."""
+    fs, fc = _centres(groups, space["face"])
+    bs, bc = _centres(groups, space["body"])
+    f, b = _unit(fs, fc), _unit(bs, bc)
+    allowed = offered.copy()
+    score, _ = _links(f @ f.T, b @ b.T, face_min, body_min, near)
+    score[~allowed] = -np.inf
+    groups, found = [list(g) for g in groups], [list(x) for x in found]
+    alive = np.ones(len(groups), dtype=bool)
+    keys = space["keys"]
+    while len(groups) > 1:
+        a, c = divmod(int(np.argmax(score)), len(groups))
+        if not np.isfinite(score[a, c]):
+            break
+        _, by_body = _links(
+            f[c : c + 1] @ f[a], b[c : c + 1] @ b[a], face_min, body_min, None
+        )
+        threshold = body_min if by_body[0] else face_min
+        found[a] += found[c] + [
+            {
+                "a": min(keys[i] for i in groups[a]),
+                "b": min(keys[i] for i in groups[c]),
+                "modality": "body" if by_body[0] else "face",
+                "similarity": round(float(score[a, c]), 4),
+                "threshold": threshold,
+                "margin": round(float(score[a, c]) - threshold, 4),
+            }
+        ]
+        groups[a] += groups[c]
+        alive[c] = False
+        for sums, counts in ((fs, fc), (bs, bc)):
+            sums[a] += sums[c]
+            counts[a] += counts[c]
+        allowed[a] &= allowed[c]
+        allowed[:, a] = allowed[a]
+        allowed[c] = allowed[:, c] = False
+        if near is not None:
+            near[a] |= near[c]
+            near[:, a] = near[a]
+        f[a] = _unit(fs[a : a + 1], fc[a : a + 1])[0]
+        b[a] = _unit(bs[a : a + 1], bc[a : a + 1])[0]
+        f[c] = b[c] = np.nan
+        row, _ = _links(
+            f @ f[a], b @ b[a], face_min, body_min, None if near is None else near[a]
+        )
+        row[~allowed[a]] = -np.inf
+        score[a] = score[:, a] = row
+        score[c] = score[:, c] = -np.inf
+    keep = np.flatnonzero(alive)
+    return [groups[k] for k in keep], [found[k] for k in keep]
+
+
+def _pass(
+    groups: list[list[int]],
+    found: list[list[dict[str, Any]]],
+    space: dict[str, Any],
+    scope: str,
+    face_min: float,
+    body_min: float,
+) -> tuple[list[list[int]], list[list[dict[str, Any]]]]:
+    """Inside a segment, or across segments: groups sharing a frame, or a segment across cuts, never merge."""
+    if len(groups) < 2:
+        return groups, found
+    segments = [{int(space["segment"][i]) for i in g} for g in groups]
+    offered = np.zeros((len(groups), len(groups)), dtype=bool)
+    near = offered.copy() if scope == "across" else None
+    for i, j in itertools.combinations(range(len(groups)), 2):
+        apart = (
+            segments[i] == segments[j]
+            if scope == "within"
+            else segments[i].isdisjoint(segments[j])
+        )
+        if apart and not space["blocked"][np.ix_(groups[i], groups[j])].any():
+            offered[i, j] = offered[j, i] = True
+        if near is not None:
+            gap = min(abs(s - t) for s in segments[i] for t in segments[j])
+            near[i, j] = near[j, i] = gap <= NEAR
+    return _average(groups, found, space, offered, near, face_min, body_min)
+
+
+def _two_passes(
+    members: list[int], space: dict[str, Any], cfg: Config
+) -> tuple[list[list[int]], list[list[dict[str, Any]]], int, int]:
+    groups: list[list[int]] = [[i] for i in members]
+    found: list[list[dict[str, Any]]] = [[] for _ in members]
+    within, found = _pass(
+        groups,
+        found,
+        space,
+        "within",
+        cfg.identity_face_within,
+        cfg.identity_body_within,
+    )
+    across, found = _pass(
+        within,
+        found,
+        space,
+        "across",
+        cfg.identity_face_across,
+        cfg.identity_body_across,
+    )
+    return across, found, len(groups) - len(within), len(within) - len(across)
+
+
+def _attach(
+    groups: list[list[int]],
+    found: list[list[dict[str, Any]]],
+    faceless: list[int],
+    space: dict[str, Any],
+    cfg: Config,
+) -> list[int]:
+    """Each face-less track joins the group of the closest body with a face in its own or a neighbouring segment,
+    if it clears the body threshold and shares no frame with the group; returns the rest."""
+    owner = {i: g for g, members in enumerate(groups) for i in members}
+    bodies, segment = space["body"], space["segment"]
+    faced = [i for i in owner if not np.isnan(bodies[i, 0])]
+    rest = []
+    for u in faceless:
+        near = [i for i in faced if abs(int(segment[i]) - int(segment[u])) <= NEAR]
+        sims = bodies[near] @ bodies[u] if near else np.zeros(0)
+        for k in np.argsort(-sims, kind="stable"):
+            i, g = near[k], owner[near[k]]
+            floor = (
+                cfg.identity_body_within
+                if segment[i] == segment[u]
+                else cfg.identity_body_across
+            )
+            if sims[k] >= floor and not space["blocked"][u, groups[g]].any():
+                groups[g].append(u)
+                found[g].append(
+                    {
+                        "a": space["keys"][i],
+                        "b": space["keys"][u],
+                        "modality": "body",
+                        "similarity": round(float(sims[k]), 4),
+                        "threshold": floor,
+                        "margin": round(float(sims[k]) - floor, 4),
+                    }
+                )
+                break
+        else:
+            rest.append(u)
+    return rest
+
+
+def _matrix(units: list[dict[str, Any]], kind: str) -> Array:
+    width = next((len(u[kind]) for u in units if u[kind] is not None), 1)
+    out: Array = np.full((len(units), width), np.nan)
+    for i, unit in enumerate(units):
+        if unit[kind] is not None:
+            out[i] = unit[kind]
+    return out
+
+
+def _shared(units: list[dict[str, Any]]) -> Array:
+    """Which units share a frame."""
+    spans = [(min(u["frames"]), max(u["frames"])) for u in units]
+    order = sorted(range(len(units)), key=lambda i: spans[i][0])
+    out = np.zeros((len(units), len(units)), dtype=bool)
+    for n, i in enumerate(order):
+        for j in order[n + 1 :]:
+            if spans[j][0] > spans[i][1]:
+                break
+            if units[i]["frames"] & units[j]["frames"]:
+                out[i, j] = out[j, i] = True
+    return out
+
+
+def _combine(
+    units: list[dict[str, Any]], members: list[int], found: list[dict[str, Any]]
+) -> dict[str, Any]:
+    frames: set[int] = set()
+    for i in members:
+        frames |= units[i]["frames"]
+    return {
+        "keys": sorted(k for i in members for k in units[i]["keys"]),
+        "frames": frames,
+        "links": [link for i in members for link in units[i]["links"]] + found,
+        "face": _mean([units[i]["face"] for i in members]),
+        "body": _mean([units[i]["body"] for i in members]),
+        "face_crops": sum(units[i]["face_crops"] for i in members),
+        "body_crops": sum(units[i]["body_crops"] for i in members),
+    }
+
+
+def _resolve(
+    units: list[dict[str, Any]], cfg: Config
+) -> tuple[list[dict[str, Any]], int, int, int]:
+    """Faces first, by group means, inside a segment and then across segments; face-less units join a face's group
+    by a nearby body, and the rest group by body alone (2026-11-07)."""
+    space: dict[str, Any] = {
+        "keys": [tuple(u["keys"][0]) for u in units],
+        "segment": np.array([int(u["keys"][0][0]) for u in units], dtype=np.int64),
+        "blocked": _shared(units),
+        "face": _matrix(units, "face"),
+        "body": _matrix(units, "body"),
+    }
+    faced = [i for i, u in enumerate(units) if u["face"] is not None]
+    faceless = [i for i, u in enumerate(units) if u["face"] is None]
+    groups, found, within, across = _two_passes(
+        faced, space | {"body": np.full_like(space["body"], np.nan)}, cfg
+    )
+    rest = _attach(groups, found, faceless, space, cfg)
+    more, more_found, within_more, across_more = _two_passes(
+        rest, space | {"face": np.full_like(space["face"], np.nan)}, cfg
+    )
+    final = [_combine(units, g, x) for g, x in zip(groups + more, found + more_found)]
+    return final, within + within_more, across + across_more, len(faceless) - len(rest)
+
+
 def run(cfg: Config) -> dict[str, Any]:
     segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
     tracks_meta = _read(cfg.json_dir, "tracks.json", "06-detection-tracking")
@@ -310,34 +563,7 @@ def run(cfg: Config) -> dict[str, Any]:
     units = [u for u in merged if u["face"] is not None or u["body"] is not None]
     abstained = [u for u in merged if u["face"] is None and u["body"] is None]
 
-    # Pass one, inside a segment; tracks sharing a frame are two people
-    by_segment: dict[int, list[int]] = {}
-    for i, unit in enumerate(units):
-        by_segment.setdefault(int(unit["keys"][0][0]), []).append(i)
-    within_pairs = [
-        (i, j)
-        for group in by_segment.values()
-        for i, j in itertools.combinations(group, 2)
-        if not (units[i]["frames"] & units[j]["frames"])
-    ]
-    after_within = _cluster(
-        units, within_pairs, cfg.identity_face_within, cfg.identity_body_within
-    )
-    within_merges = len(units) - len(after_within)
-
-    # Pass two, across segments only: a merge pass one refused is not re-offered
-    across_pairs = [
-        (i, j)
-        for i, j in itertools.combinations(range(len(after_within)), 2)
-        if {k[0] for k in after_within[i]["keys"]}.isdisjoint(
-            {k[0] for k in after_within[j]["keys"]}
-        )
-        and not (after_within[i]["frames"] & after_within[j]["frames"])
-    ]
-    final = _cluster(
-        after_within, across_pairs, cfg.identity_face_across, cfg.identity_body_across
-    )
-    across_merges = len(after_within) - len(final)
+    final, within_merges, across_merges, attached_merges = _resolve(units, cfg)
 
     # abstained tracks stay singletons
     everyone = final + abstained
@@ -397,6 +623,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "same_face_merges": same_face_merges,
         "within_merges": within_merges,
         "across_merges": across_merges,
+        "attached_merges": attached_merges,
         "face_descriptors": sum(1 for t in tracks if t["face"] is not None),
         "body_descriptors": sum(1 for t in tracks if t["body"] is not None),
         "thresholds": {
@@ -407,6 +634,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "min_area": cfg.identity_min_area,
             "min_frontality": cfg.identity_min_front,
             "face_veto": FACE_VETO,
+            "joining": "group means, faces first",
+            "body_near_segments": NEAR,
             "same_face": {
                 "share": SAME_FACE_SHARE,
                 "frames": SAME_FACE_FRAMES,

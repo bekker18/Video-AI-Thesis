@@ -180,25 +180,25 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--identity-face-within",
         type=float,
-        default=0.55,
+        default=0.311,
         help="face cosine a link needs inside a segment",
     )
     p.add_argument(
         "--identity-face-across",
         type=float,
-        default=0.45,
+        default=0.449,
         help="face cosine a link needs across segments",
     )
     p.add_argument(
         "--identity-body-within",
         type=float,
-        default=0.70,
+        default=0.575,
         help="body cosine a link needs inside a segment",
     )
     p.add_argument(
         "--identity-body-across",
         type=float,
-        default=0.60,
+        default=0.512,
         help="body cosine a link needs across segments",
     )
     p.add_argument(
