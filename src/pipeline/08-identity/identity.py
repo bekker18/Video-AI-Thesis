@@ -17,10 +17,11 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
 Key: TypeAlias = tuple[int, int]  # (segment, track_id)
 
-FACE_VETO = 0.331  # faces under it never link; fitted on VPCD, carried over by rate (2026-11-07)
-NEAR = 1  # a body-only link across cuts reaches at most this many segments
+FACE_VETO = 0.331  # faces under it never link; fitted on VPCD (2026-11-07)
+NEAR = 2  # segments a body-only link may reach across cuts: A-B-A dialogue
+LARGE_FACE = 16_000  # px; a face this large needs no frontality
 
-# One person boxed twice, set on the reels (STATE.md, One person tracked twice)
+# One person boxed twice, set on the reels (HISTORY.md, 2026-10-19)
 SAME_FACE_SHARE = 0.8
 SAME_FACE_FRAMES = 2
 SAME_FACE_IOU = 0.5
@@ -50,9 +51,19 @@ def _usable(crop: dict[str, Any], cfg: Config, kind: str) -> bool:
         return False
     if kind == "face":
         frontality = crop["frontality"]
-        if frontality is None or float(frontality) < cfg.identity_min_front:
+        if frontality is None:
+            return False
+        if (
+            float(frontality) < cfg.identity_min_front
+            and float(crop["area"]) < LARGE_FACE
+        ):
             return False
     return True
+
+
+def _own_face(row: dict[str, Any] | None) -> bool:
+    """A face counts for a track only when seated in its body box, not a neighbour's caught inside it."""
+    return bool(row and row.get("face") and _seated(row["face"], row["body"]))
 
 
 def _descriptor(
@@ -68,30 +79,6 @@ def _descriptor(
         return None
     out: Array = vector / norm
     return out
-
-
-def _link(
-    a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
-) -> dict[str, Any] | None:
-    """The best modality clearing its own threshold; one only a track has is no evidence."""
-    if _faces_disagree(a, b):
-        return None
-    best: dict[str, Any] | None = None
-    for kind, floor in (("face", face_min), ("body", body_min)):
-        left, right = a[kind], b[kind]
-        if left is None or right is None:
-            continue
-        similarity = float(left @ right)
-        if similarity < floor:
-            continue
-        if best is None or similarity - floor > float(best["margin"]):
-            best = {
-                "modality": kind,
-                "similarity": round(similarity, 4),
-                "threshold": floor,
-                "margin": round(similarity - floor, 4),
-            }
-    return best
 
 
 def _faces_disagree(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -123,9 +110,7 @@ def _seated(face: list[int], body: list[int]) -> bool:
     return side <= SEATED_SIDE and top <= SEATED_TOP
 
 
-def _same_face(
-    a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
-) -> dict[str, Any] | None:
+def _same_face(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any] | None:
     """One face box seated in both bodies, in most frames both have a face; disagreeing faces veto."""
     rows_a, rows_b = a["observed"], b["observed"]
     both = [
@@ -153,69 +138,44 @@ def _same_face(
     }
 
 
-def _cluster(
-    units: list[dict[str, Any]],
-    pairs: list[tuple[int, int]],
-    face_min: float,
-    body_min: float,
-    link: Any = None,
-) -> list[dict[str, Any]]:
-    """Complete linkage in descending similarity; `link` replaces the appearance rule."""
-    link = link or _link
-    scored: list[tuple[float, int, int, dict[str, Any]]] = []
-    for i, j in pairs:
-        found = link(units[i], units[j], face_min, body_min)
-        if found is not None:
-            scored.append((float(found["similarity"]), i, j, found))
-    # ties on keys, so two runs agree
-    scored.sort(key=lambda s: (-s[0], units[s[1]]["keys"][0], units[s[2]]["keys"][0]))
-
-    allowed = {(i, j) for i, j in pairs} | {(j, i) for i, j in pairs}
-    members = {i: [i] for i in range(len(units))}
-    owner = list(range(len(units)))
-    links: dict[int, list[dict[str, Any]]] = {i: [] for i in range(len(units))}
-
-    for _, i, j, found in scored:
+def _pass_zero(tracks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One person boxed twice: tracks of a segment sharing frames and one seated face join, in descending
+    share, only if every pair across the two groups does (complete linkage); ties go by key."""
+    found = {
+        (i, j): link
+        for i, j in itertools.combinations(range(len(tracks)), 2)
+        if tracks[i]["keys"][0][0] == tracks[j]["keys"][0][0]
+        and tracks[i]["frames"] & tracks[j]["frames"]
+        and (link := _same_face(tracks[i], tracks[j])) is not None
+    }
+    order = sorted(
+        found,
+        key=lambda p: (
+            -found[p]["similarity"],
+            tracks[p[0]]["keys"][0],
+            tracks[p[1]]["keys"][0],
+        ),
+    )
+    members = {i: [i] for i in range(len(tracks))}
+    links: dict[int, list[dict[str, Any]]] = {i: [] for i in range(len(tracks))}
+    owner = list(range(len(tracks)))
+    for i, j in order:
         left, right = owner[i], owner[j]
-        if left == right:
-            continue
-        joined = [(x, y) for x in members[left] for y in members[right]]
-        if any((x, y) not in allowed for x, y in joined):
-            continue
-        if any(link(units[x], units[y], face_min, body_min) is None for x, y in joined):
+        if left == right or any(
+            (min(x, y), max(x, y)) not in found
+            for x in members[left]
+            for y in members[right]
+        ):
             continue
         members[left] += members[right]
         links[left] += links[right] + [
-            {
-                "a": units[i]["keys"][0],
-                "b": units[j]["keys"][0],
-                **found,
-            }
+            {"a": tracks[i]["keys"][0], "b": tracks[j]["keys"][0], **found[(i, j)]}
         ]
         for index in members[right]:
             owner[index] = left
         del members[right], links[right]
-
-    merged: list[dict[str, Any]] = []
-    for root, group in members.items():
-        keys = sorted(k for index in group for k in units[index]["keys"])
-        frames: set[int] = set()
-        for index in group:
-            frames |= units[index]["frames"]
-        merged.append(
-            {
-                "keys": keys,
-                "frames": frames,
-                "links": [link for index in group for link in units[index]["links"]]
-                + links[root],
-                "face": _mean([units[i]["face"] for i in group]),
-                "body": _mean([units[i]["body"] for i in group]),
-                "face_crops": sum(units[i]["face_crops"] for i in group),
-                "body_crops": sum(units[i]["body_crops"] for i in group),
-            }
-        )
-    merged.sort(key=lambda u: u["keys"][0])
-    return merged
+    merged = [_combine(tracks, group, links[root]) for root, group in members.items()]
+    return sorted(merged, key=lambda u: u["keys"][0])
 
 
 def _yields(
@@ -246,8 +206,8 @@ def _mean(vectors: list[Array | None]) -> Array | None:
 def _links(
     f: Array, b: Array, face_min: float, body_min: float, body_ok: Array | None
 ) -> tuple[Array, Array]:
-    """_link on arrays of similarities: the modality clearing its threshold by more, -inf where none does or the
-    faces disagree; and whether that modality is the body."""
+    """The link test on arrays of similarities: the modality clearing its threshold by more, -inf where none does
+    or the faces disagree; and whether that modality is the body."""
     with np.errstate(invalid="ignore"):
         has_f, has_b = ~np.isnan(f), ~np.isnan(b)
         ok_f = has_f & (f >= face_min)
@@ -352,12 +312,12 @@ def _pass(
     offered = np.zeros((len(groups), len(groups)), dtype=bool)
     near = offered.copy() if scope == "across" else None
     for i, j in itertools.combinations(range(len(groups)), 2):
-        apart = (
+        fits = (
             segments[i] == segments[j]
             if scope == "within"
             else segments[i].isdisjoint(segments[j])
         )
-        if apart and not space["blocked"][np.ix_(groups[i], groups[j])].any():
+        if fits and not space["blocked"][np.ix_(groups[i], groups[j])].any():
             offered[i, j] = offered[j, i] = True
         if near is not None:
             gap = min(abs(s - t) for s in segments[i] for t in segments[j])
@@ -520,6 +480,9 @@ def run(cfg: Config) -> dict[str, Any]:
             attrs = rows_by_track.get(key, {})
             descriptors: dict[str, Array | None] = {}
             counts: dict[str, int] = {}
+            observed = {
+                int(r["frame"]): r for r in track["frames"] if not r["interpolated"]
+            }
             for kind, field, table in (
                 ("face", "embedding_rows", faces),
                 ("body", "body_rows", bodies),
@@ -528,6 +491,7 @@ def run(cfg: Config) -> dict[str, Any]:
                     int(c["frame"])
                     for c in track["crops"][kind]
                     if _usable(c, cfg, kind)
+                    and (kind == "body" or _own_face(observed.get(int(c["frame"]))))
                 }
                 rows = list(attrs.get(field, []))
                 descriptors[kind] = _descriptor(rows, keep, table)
@@ -538,11 +502,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 {
                     "keys": [list(key)],
                     "frames": set(body_boxes[key]),
-                    "observed": {
-                        int(r["frame"]): r
-                        for r in track["frames"]
-                        if not r["interpolated"]
-                    },
+                    "observed": observed,
                     "links": [],
                     "face": descriptors["face"],
                     "body": descriptors["body"],
@@ -551,14 +511,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 }
             )
 
-    # Pass zero: one person boxed twice, which shares frames the passes below never join
-    co_present = [
-        (i, j)
-        for i, j in itertools.combinations(range(len(tracks)), 2)
-        if tracks[i]["keys"][0][0] == tracks[j]["keys"][0][0]
-        and tracks[i]["frames"] & tracks[j]["frames"]
-    ]
-    merged = _cluster(tracks, co_present, 0.0, 0.0, link=_same_face)
+    merged = _pass_zero(tracks)
     same_face_merges = len(tracks) - len(merged)
     units = [u for u in merged if u["face"] is not None or u["body"] is not None]
     abstained = [u for u in merged if u["face"] is None and u["body"] is None]
@@ -636,6 +589,8 @@ def run(cfg: Config) -> dict[str, Any]:
             "face_veto": FACE_VETO,
             "joining": "group means, faces first",
             "body_near_segments": NEAR,
+            "large_face": LARGE_FACE,
+            "face_seated_in_body": True,
             "same_face": {
                 "share": SAME_FACE_SHARE,
                 "frames": SAME_FACE_FRAMES,
