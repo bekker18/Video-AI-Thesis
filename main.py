@@ -15,7 +15,7 @@ from src.tools import download_models
 
 ROOT = Path(__file__).resolve().parent
 
-# Stages run in this order. Extended as modules are added.
+# Stages run in this order.
 STAGES = [
     "01-sampling",
     "02-segmentation",
@@ -96,7 +96,16 @@ def parse_args() -> argparse.Namespace:
         help="frames shared between adjacent inference windows",
     )
     p.add_argument(
-        "--keyframes", type=int, default=3, help="representative frames kept per shot"
+        "--keyframe-every",
+        type=float,
+        default=3.0,
+        help="seconds of a shot per keyframe, so long shots get more",
+    )
+    p.add_argument(
+        "--keyframes-min", type=int, default=3, help="fewest keyframes in a shot"
+    )
+    p.add_argument(
+        "--keyframes-max", type=int, default=10, help="most keyframes in a shot"
     )
 
     p.add_argument(
@@ -321,7 +330,9 @@ def main() -> None:
             width=args.width,
             shot_mode=args.shot_mode,
             shot_overlap=args.shot_overlap,
-            keyframes=args.keyframes,
+            keyframe_every=args.keyframe_every,
+            keyframes_min=args.keyframes_min,
+            keyframes_max=args.keyframes_max,
             detector=args.detector,
             det_conf=args.det_conf,
             face_conf=args.face_conf,

@@ -33,7 +33,9 @@ class Config:
     # 02-segmentation
     shot_mode: str  # default | clean_shot
     shot_overlap: int  # frames shared between adjacent inference windows
-    keyframes: int  # representative frames kept per shot
+    keyframe_every: float  # seconds of a shot per keyframe
+    keyframes_min: int  # fewest keyframes in a shot
+    keyframes_max: int  # most keyframes in a shot
 
     # 03-profiler
     detector: str  # yolo11n | yolo11s | yolo11m | rtdetr-l

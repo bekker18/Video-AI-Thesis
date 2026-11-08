@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -244,7 +245,7 @@ def _by_segment(
         mine = [s for s in series if int(s["segment"]) == segment]
         entry: dict[str, Any] = {
             "segment": segment,
-            "duration_seconds": round(frames / fps, 3) if fps else 0.0,
+            "duration_seconds": round(frames / fps, 3),
             "series": len(mine),
             **_affect([s["emotion"] for s in mine if "emotion" in s]),
         }
@@ -290,10 +291,10 @@ def _person(
         "segments": person["segments"],
         "linked": person["linked"],
         "abstained": person["abstained"],
-        "first_frame": min(int(s["first_frame"]) for _, s in spans) if spans else None,
-        "last_frame": max(int(s["last_frame"]) for _, s in spans) if spans else None,
+        "first_frame": min(int(s["first_frame"]) for _, s in spans),
+        "last_frame": max(int(s["last_frame"]) for _, s in spans),
         "duration_frames": frames,
-        "duration_seconds": round(frames / fps, 3) if fps else 0.0,
+        "duration_seconds": round(frames / fps, 3),
         "support": {
             "segments": len(person["segments"]),
             "tracks": len(spans),
@@ -526,7 +527,7 @@ def _whole_video(shots: list[dict[str, Any]], top: int) -> dict[str, Any]:
     for shot in shots:
         seconds = float(shot["end_time"]) - float(shot["start_time"])
         plastic = shot["plastic"]
-        keyframes = max(1, int(plastic.get("n", 0)))
+        keyframes = int(plastic["n"])
         for tag in plastic.get("tags") or []:
             tags[tag["label"]] = (
                 tags.get(tag["label"], 0.0) + seconds * int(tag["n"]) / keyframes
@@ -548,7 +549,7 @@ def _whole_video(shots: list[dict[str, Any]], top: int) -> dict[str, Any]:
             entry[0] += int(found["frame_count"])
             entry[1] += seconds * float(found["share"])
 
-    total = sum(float(s["end_time"]) - float(s["start_time"]) for s in shots) or 1.0
+    total = sum(float(s["end_time"]) - float(s["start_time"]) for s in shots)
 
     def ranked(weights: dict[str, float], key: str) -> list[dict[str, Any]]:
         order = sorted(weights.items(), key=lambda kv: (-kv[1], kv[0]))[:top]
@@ -740,6 +741,63 @@ def _camera(steps: list[Motion | None], fps: float) -> dict[str, Any]:
     }
 
 
+def _by_keyframe(
+    keyframes: list[dict[str, Any]],
+    tracks: dict[str, Any],
+    conditional: dict[str, Any],
+    motions: list[Motion | None],
+    size: tuple[int, int],
+    fps: float,
+) -> list[dict[str, Any]]:
+    """One entry per keyframe, over the part of the segment nearest to it: the order inside a segment."""
+
+    def mean(values: list[float]) -> float | None:
+        return round(float(np.mean(values)), 4) if values else None
+
+    start, end = int(conditional["start_frame"]), int(conditional["end_frame"])
+    marks = sorted(int(k["frame"]) for k in keyframes)
+    cuts = [start, *((a + b) // 2 for a, b in itertools.pairwise(marks)), end + 1]
+    samples = [s for t in conditional["tracks"] for s in t["series"]]
+    followed = tracks["tracks"] if tracks["tracked"] else []
+    out: list[dict[str, Any]] = []
+    for a, b in itertools.pairwise(cuts):
+        if b <= a:
+            continue
+        felt = [
+            s["emotion"] for s in samples if "emotion" in s and a <= int(s["frame"]) < b
+        ]
+        rows = [[r for r in t["frames"] if a <= int(r["frame"]) < b] for t in followed]
+        on_screen = Counter(int(r["frame"]) for row in rows for r in row)
+        looks = [k["classical"] for k in keyframes if a <= int(k["frame"]) < b]
+        out.append(
+            {
+                "start_frame": a,
+                "end_frame": b - 1,
+                "start": round(a / fps, 3),
+                "end": round(b / fps, 3),
+                "brightness": mean([float(k["brightness"]) for k in looks]),
+                "warmth": mean([float(k["mean_lab"][2]) - 128.0 for k in looks]),
+                "emotion": {
+                    label: mean([float(e["scores"][label]) for e in felt])
+                    for label in felt[0]["scores"]
+                }
+                if felt
+                else None,
+                **{
+                    axis: mean(
+                        [float(e[axis]) for e in felt if e.get(axis) is not None]
+                    )
+                    for axis in ("valence", "arousal")
+                },
+                "people": max(on_screen.values(), default=0),
+                "framing": _framing({"tracks": [{"frames": r} for r in rows]}, size),
+                # pairs inside the segment only
+                "camera": _camera(motions[a : min(b, end)], fps)["movement"],
+            }
+        )
+    return out
+
+
 def run(cfg: Config) -> dict[str, Any]:
     segmentation = _read(cfg.json_dir, "segmentation.json", "02-segmentation")
     routing = _read(cfg.json_dir, "routing.json", "04-router")
@@ -809,15 +867,15 @@ def run(cfg: Config) -> dict[str, Any]:
                     if int(c["frame"]) not in skip
                 }
             )
-            source = tracks_by_key.get(key)
-            if source is None:
+            track = tracks_by_key.get(key)
+            if track is None:
                 continue
             series += [
                 {**sample, "segment": key[0]}
-                for sample in source["series"]
+                for sample in track["series"]
                 if int(sample["frame"]) not in skip
             ]
-            attributes = source.get("attributes", {})
+            attributes = track.get("attributes", {})
             kept = [
                 int(r["frame"]) not in skip
                 for r in attributes.get("embedding_rows", [])
@@ -869,15 +927,16 @@ def run(cfg: Config) -> dict[str, Any]:
                 "index": index,
                 "start_frame": shot["start_frame"],
                 "end_frame": shot["end_frame"],
-                "start_time": round(int(shot["start_frame"]) / fps, 3) if fps else 0.0,
-                "end_time": round((int(shot["end_frame"]) + 1) / fps, 3)
-                if fps
-                else 0.0,
+                "start_time": round(start / fps, 3),
+                "end_time": round((end + 1) / fps, 3),
                 "experts": gates.get(index, []),
                 "tracked": bool(source["tracked"]),
                 "person_ids": sorted(by_segment.get(index, [])),
                 "plastic": plastic[index],
                 "camera": cameras.get(index),
+                "keyframes": _by_keyframe(
+                    by_shot.get(index, []), source, shot, motions, size, fps
+                ),
                 "text": _text(shot["text"]),
                 # share of the detection frames 06 ran on that saw the class
                 "objects": [

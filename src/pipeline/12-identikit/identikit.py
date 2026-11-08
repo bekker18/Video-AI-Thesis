@@ -176,6 +176,10 @@ PROVENANCE: dict[str, str] = {
     ),
     "enunciative.segments[].face_background_ratio": "06 YuNet face boxes, via 09",
     "enunciative.segments[].portrait_scene": "face_background_ratio against PORTRAIT",
+    "plastic.segments[].keyframes": "05 OpenCV measures per keyframe, via 09",
+    "figurative.segments[].keyframes": "07 HSEmotion samples of everyone on screen and 06 tracks, per keyframe's part of "
+    "the segment, via 09",
+    "enunciative.segments[].keyframes": "camera_distance's and camera's rules over each keyframe's part of the segment",
 }
 
 CAVEATS: tuple[str, ...] = (
@@ -206,6 +210,7 @@ CAVEATS: tuple[str, ...] = (
     "a smooth broadcast or drawn camera can still read as a handheld rig",
     "temperature is the keyframes' mean colour, so grading counts as much as light",
     "subjects are animal classes the detector saw often enough, neither tracked nor told apart",
+    "a keyframe's emotion, valence and arousal pool everyone on screen in its part of the segment, not one person",
 )
 
 
@@ -388,7 +393,7 @@ def _counted(
 
 def _shares(seconds: dict[str, float], duration: float) -> dict[str, float]:
     ranked = sorted(seconds.items(), key=lambda kv: (-kv[1], kv[0]))
-    return {k: round(v / duration, 3) for k, v in ranked} if duration else {}
+    return {k: round(v / duration, 3) for k, v in ranked}
 
 
 def _temperature(warmth: float | None) -> str | None:
@@ -627,8 +632,8 @@ def _size(face: float, body: float, samples: list[list[float]]) -> tuple[int, st
 
 def _body_samples(
     tracks: dict[str, Any], conditional: dict[str, Any], size: tuple[int, int]
-) -> dict[int, list[list[float]]]:
-    """Per segment, the body-part visibilities of its largest followed person over 07's pose samples."""
+) -> dict[int, list[tuple[int, list[float]]]]:
+    """Per segment, the body-part visibilities of its largest followed person, frame by frame, over 07's pose samples."""
     poses = {
         (int(s["index"]), int(t["track_id"])): [
             r for r in t.get("series", []) if r.get("pose")
@@ -636,7 +641,7 @@ def _body_samples(
         for s in conditional["shots"]
         for t in s.get("tracks", [])
     }
-    out: dict[int, list[list[float]]] = {}
+    out: dict[int, list[tuple[int, list[float]]]] = {}
     for shot in tracks["shots"]:
         index = int(shot["index"])
         bodies = {
@@ -655,7 +660,10 @@ def _body_samples(
             ),
         )
         out[index] = [
-            _parts(r["pose"]["keypoints"], bodies[main][int(r["frame"])], size)
+            (
+                int(r["frame"]),
+                _parts(r["pose"]["keypoints"], bodies[main][int(r["frame"])], size),
+            )
             for r in poses.get((index, main), [])
             if int(r["frame"]) in bodies[main]
         ]
@@ -737,6 +745,26 @@ def _framing(
     }
 
 
+def _keyframes(shot: dict[str, Any], keys: tuple[str, ...]) -> list[dict[str, Any]]:
+    """One level's share of a segment's per-keyframe entries."""
+    return [{k: e[k] for k in ("start", "end", *keys)} for e in shot["keyframes"]]
+
+
+def _keyframe_size(
+    keyframe: dict[str, Any],
+    samples: list[tuple[int, list[float]]],
+    segment: dict[str, Any] | None,
+) -> str | None:
+    """The shot size over one keyframe's part of a segment; with nobody seen there, the segment's."""
+    seen = [
+        parts
+        for frame, parts in samples
+        if keyframe["start_frame"] <= frame <= keyframe["end_frame"]
+    ]
+    found = _framing(keyframe["framing"], seen, None)["camera_distance"] or segment
+    return found["scale"] if found else None
+
+
 def _caption(
     json_dir: Path, shots: list[dict[str, Any]]
 ) -> tuple[dict[str, Any] | None, str]:
@@ -760,6 +788,10 @@ def run(cfg: Config) -> dict[str, Any]:
     if "whole_video" not in aggregated:
         raise RuntimeError(
             "aggregated.json predates whole_video; re-run 09-aggregation"
+        )
+    if any("keyframes" not in s for s in aggregated["shots"]):
+        raise RuntimeError(
+            "aggregated.json predates the keyframe lists; re-run 09-aggregation"
         )
     samples = _body_samples(
         _read(cfg.json_dir, "tracks.json", "06-detection-tracking"),
@@ -900,6 +932,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 ],
                 "centralities": _centralities(plastic),
                 "depth": _depth(plastic),
+                "keyframes": _keyframes(shot, ("brightness", "warmth")),
             }
         )
 
@@ -933,26 +966,40 @@ def run(cfg: Config) -> dict[str, Any]:
                 "text": _text(shot["text"], bound_text.get(index, []), keep),
                 "text_readings": len(shot["text"]),
                 "crowdedness": _crowd(at_once.get(index, 0)),
+                "keyframes": _keyframes(
+                    shot, ("emotion", "valence", "arousal", "people")
+                ),
             }
         )
 
+        poses = samples.get(index, [])
+        framing = _framing(
+            shot.get("framing") or {}, [p for _, p in poses], nearest.get(index)
+        )
         enunciative_segments.append(
             {
                 "segment": index,
                 "visible_at_once": at_once.get(index, 0),
                 "followed": followed,
                 "assessment": _assess(at_once.get(index, 0), followed),
-                **_framing(
-                    shot.get("framing") or {},
-                    samples.get(index, []),
-                    nearest.get(index),
-                ),
+                **framing,
                 "address": _counted(shot.get("address"), ("share", "n")),
                 "camera": {
                     k: camera.get(k) for k in ("movement", "rig", "move", "direction")
                 }
                 if camera
                 else None,
+                "keyframes": [
+                    {
+                        "start": k["start"],
+                        "end": k["end"],
+                        "shot_size": _keyframe_size(
+                            k, poses, framing["camera_distance"]
+                        ),
+                        "camera": k["camera"],
+                    }
+                    for k in shot["keyframes"]
+                ],
             }
         )
 
@@ -980,7 +1027,7 @@ def run(cfg: Config) -> dict[str, Any]:
         "summary": {
             "duration_s": round(duration, 3),
             "frames": frames,
-            "fps": round(frames / duration, 2) if duration else None,
+            "fps": round(frames / duration, 2),
             "segments": len(shots),
             "medium": video_medium["label"] if video_medium else None,
             "subjects": len(subjects),
@@ -1016,9 +1063,7 @@ def run(cfg: Config) -> dict[str, Any]:
                 "mean_s": round(sum(lengths) / len(lengths), 3),
                 "min_s": round(min(lengths), 3),
                 "max_s": round(max(lengths), 3),
-                "shots_per_minute": round(60 * len(shots) / duration, 2)
-                if duration
-                else 0.0,
+                "shots_per_minute": round(60 * len(shots) / duration, 2),
             },
             "presence": [
                 {
@@ -1097,7 +1142,7 @@ def run(cfg: Config) -> dict[str, Any]:
     record["budget"] = {
         "inputs_bytes": inputs,
         "record_bytes": size,
-        "reduction": round(1 - size / inputs, 3) if inputs else 0.0,
+        "reduction": round(1 - size / inputs, 3),
     }
 
     # compact: indentation doubled the file

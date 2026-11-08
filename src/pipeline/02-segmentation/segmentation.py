@@ -171,6 +171,13 @@ def _scan(
     )
 
 
+def _spans(cfg: Config, seconds: float) -> int:
+    """Keyframe spans in a shot: one per --keyframe-every seconds, within the limits."""
+    return max(
+        cfg.keyframes_min, min(cfg.keyframes_max, round(seconds / cfg.keyframe_every))
+    )
+
+
 def _select(embeddings: Array, sharp: Array, start: int, end: int, k: int) -> list[int]:
     """One keyframe per equal time span: the sharpest of the frames closest to the span's mean."""
     length = end - start + 1
@@ -257,7 +264,8 @@ def run(cfg: Config) -> dict[str, Any]:
         wanted.setdefault(start, []).append(first)
 
         keyframes: list[dict[str, Any]] = []
-        for frame in _select(embeddings, sharp, start, end, cfg.keyframes):
+        spans = _spans(cfg, (end - start + 1) / fps)
+        for frame in _select(embeddings, sharp, start, end, spans):
             path = keys_dir / f"{index:04d}_{frame:06d}.jpg"
             wanted.setdefault(frame, []).append(path)
             keyframes.append(
@@ -298,6 +306,11 @@ def run(cfg: Config) -> dict[str, Any]:
         "shot_model": SHOT_REPO,
         "embed_model": CLIP_MODEL,
         "device": device,
+        "keyframe_rule": {
+            "every": cfg.keyframe_every,
+            "min": cfg.keyframes_min,
+            "max": cfg.keyframes_max,
+        },
         "shots": shots,
     }
     if detected != len(shots):

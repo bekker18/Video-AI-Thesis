@@ -10,6 +10,7 @@ import json
 import math
 import sys
 from collections.abc import Callable
+from itertools import pairwise
 from pathlib import Path
 from typing import Any, TypeAlias
 
@@ -24,7 +25,6 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 Kit: TypeAlias = dict[str, Any]
 Mix: TypeAlias = dict[str, float]
 
-LEVELS = ("plastic", "figurative", "enunciative")
 QUANTILES = np.linspace(
     0.005, 0.995, 100
 )  # where two distributions of values are compared
@@ -321,7 +321,6 @@ FIELDS: tuple[tuple[str, str, str, str, Callable[[Kit], Any]], ...] = (
 )
 
 
-LEVEL_OF = {name: level for name, level, _, _, _ in FIELDS}
 KIND_OF = {name: kind for name, _, _, kind, _ in FIELDS}
 LOGGED = {"shot lengths"}  # fields read as logarithms
 RARE = {
@@ -330,6 +329,126 @@ RARE = {
     "objects",
     "animals",
 }  # label sets where a label counts more the fewer videos carry it
+
+
+Seq: TypeAlias = list[
+    tuple[float, float, Any]
+]  # (start, end) as shares of the video, and the value
+FLAT = (
+    0.5  # transitions: a step under this share of the collection's median step is flat
+)
+
+
+def _sequence(
+    kit: Kit, level: str, read: Callable[[dict[str, Any], dict[str, Any]], Any]
+) -> Seq | None:
+    """One level's per-keyframe values in time order, times as shares of the video; keyframes without a value are left out."""
+    segments = kit["timeline"]["segments"]
+    if not segments:
+        return None
+    start = min(float(s["start"]) for s in segments)
+    length = max(float(s["end"]) for s in segments) - start
+    if length <= 0:
+        return None
+    seq = [
+        ((float(k["start"]) - start) / length, (float(k["end"]) - start) / length, v)
+        for s in kit[level]["segments"]
+        for k in s["keyframes"]
+        if (v := read(k, s)) is not None
+    ]
+    return seq or None
+
+
+def _value_arc(level: str, key: str) -> Callable[[Kit], Seq | None]:
+    return lambda kit: _sequence(kit, level, lambda k, _: k[key])
+
+
+def _label_arc(
+    level: str, pick: Callable[[dict[str, Any]], str | None]
+) -> Callable[[Kit], Seq | None]:
+    def read(keyframe: dict[str, Any], _: dict[str, Any]) -> Mix | None:
+        label = pick(keyframe)
+        return {label: 1.0} if label else None
+
+    return lambda kit: _sequence(kit, level, read)
+
+
+def _pace_arc(kit: Kit) -> Seq | None:
+    """Each keyframe carries its segment's length, so steps inside a segment are flat."""
+    seconds = _seconds(kit)
+
+    def read(_: dict[str, Any], segment: dict[str, Any]) -> float | None:
+        length = seconds[int(segment["segment"])]
+        return math.log(length) if length > 0 else None
+
+    return _sequence(kit, "plastic", read)
+
+
+# name, level, kind, reader: how a video unfolds, read per keyframe
+ARCS: tuple[tuple[str, str, str, Callable[[Kit], Seq | None]], ...] = (
+    ("brightness arc", "plastic", "number", _value_arc("plastic", "brightness")),
+    ("warmth arc", "plastic", "number", _value_arc("plastic", "warmth")),
+    ("pace arc", "plastic", "number", _pace_arc),
+    ("emotion arc", "figurative", "mix", _value_arc("figurative", "emotion")),
+    ("valence arc", "figurative", "number", _value_arc("figurative", "valence")),
+    ("arousal arc", "figurative", "number", _value_arc("figurative", "arousal")),
+    (
+        "people arc",
+        "figurative",
+        "mix",
+        # AVE's num-people stops at 5
+        _label_arc("figurative", lambda k: str(min(int(k["people"]), 5))),
+    ),
+    (
+        "shot size arc",
+        "enunciative",
+        "mix",
+        _label_arc("enunciative", lambda k: k["shot_size"]),
+    ),
+    (
+        "camera arc",
+        "enunciative",
+        "mix",
+        _label_arc(
+            "enunciative", lambda k: None if k["camera"] == "unknown" else k["camera"]
+        ),
+    ),
+)
+
+
+def _arc_transitions(seqs: list[Seq | None], kind: str) -> Array:
+    """The mix of changes from one keyframe to the next, each weighted by the two keyframes' time: label to
+    label, or rising, falling and flat for a number."""
+    steps = [
+        abs(float(y[2]) - float(x[2]))
+        for s in seqs
+        if s and kind == "number"
+        for x, y in pairwise(s)
+    ]
+    flat = (
+        FLAT * float(np.median([d for d in steps if d > 0]))
+        if any(d > 0 for d in steps)
+        else 0.0
+    )
+
+    def label(v: Any) -> str:
+        return max(v, key=v.get)
+
+    mixes: list[Mix | None] = []
+    for seq in seqs:
+        if not seq or len(seq) < 2:
+            mixes.append(None)
+            continue
+        weights: dict[str, float] = {}
+        for (s0, e0, v0), (s1, e1, v1) in pairwise(seq):
+            if kind == "mix":
+                key = f"{label(v0)} > {label(v1)}"
+            else:
+                step = float(v1) - float(v0)
+                key = "rising" if step > flat else "falling" if step < -flat else "flat"
+            weights[key] = weights.get(key, 0.0) + (e0 - s0) + (e1 - s1)
+        mixes.append(_mix(weights))
+    return _mix_distance(mixes)
 
 
 def _blank(values: list[Any], out: Array) -> Array:
@@ -470,25 +589,36 @@ def _nanmean(matrices: list[Array]) -> Array:
 
 
 def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
-    """Per field raw and calibrated matrices, then the group, level and overall averages, missing fields imputed."""
+    """Per field raw and calibrated matrices, then the group, level and overall averages, missing fields imputed.
+    How each video unfolds counts too, as an arc group in each level."""
+    if any("keyframes" not in s for kit in kits for s in kit["plastic"]["segments"]):
+        raise RuntimeError(
+            "an identikit has no keyframe lists; re-run 09-aggregation and 12-identikit"
+        )
     raw: dict[str, Array] = {}
     fields: dict[str, Array] = {}
     values: dict[str, list[Any]] = {}
-    for name, _, _, kind, read in FIELDS:
+    group_of: dict[str, tuple[str, str]] = {}
+    for name, level, group, kind, read in FIELDS:
         values[name] = [read(kit) for kit in kits]
         raw[name] = DISTANCES[kind](
             _rare(values[name]) if name in RARE else values[name]
         )
         fields[name] = _calibrate(raw[name], kind, method)
+        group_of[name] = (level, group)
+    for name, level, kind, read in ARCS:
+        values[name] = [read(kit) for kit in kits]
+        raw[name] = _arc_transitions(values[name], kind)
+        fields[name] = _calibrate(raw[name], "mix", method)
+        group_of[name] = (level, "arc")
     filled = {name: _impute(m, _lacks(values[name])) for name, m in fields.items()}
-    groups: dict[tuple[str, str], Array] = {}
-    for level, group in dict.fromkeys((lv, g) for _, lv, g, _, _ in FIELDS):
-        groups[(level, group)] = _nanmean(
-            [filled[n] for n, lv, g, _, _ in FIELDS if (lv, g) == (level, group)]
-        )
+    groups = {
+        key: _nanmean([filled[n] for n, g in group_of.items() if g == key])
+        for key in dict.fromkeys(group_of.values())
+    }
     levels = {
         level: _nanmean([m for (lv, _), m in groups.items() if lv == level])
-        for level in LEVELS
+        for level in dict.fromkeys(lv for lv, _ in group_of.values())
     }
     return {
         "values": values,
@@ -497,6 +627,7 @@ def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
         "groups": groups,
         "levels": levels,
         "overall": _nanmean(list(levels.values())),
+        "group_of": group_of,
     }
 
 
@@ -587,6 +718,8 @@ def _held_by(
     cluster's value of each: what it shares."""
     found = []
     for name, m in fields.items():
+        if name not in KIND_OF:  # an arc has no typical value to show
+            continue
         inside = m[np.ix_(members, members)][np.triu_indices(len(members), 1)]
         outside = m[np.ix_(members, others)].ravel()
         if np.isnan(inside).all() or np.isnan(outside).all():
@@ -670,14 +803,14 @@ def explain(result: dict[str, Any], names: list[str], a: str, b: str) -> str:
         return "-" if np.isnan(m[i, j]) else f"{m[i, j]:.3f}"
 
     lines = [f"{a} vs {b}: overall {cell(result['overall'])}"]
-    for level in LEVELS:
-        lines.append(f"  {level} {cell(result['levels'][level])}")
+    for level, level_matrix in result["levels"].items():
+        lines.append(f"  {level} {cell(level_matrix)}")
         for (lv, group), matrix in result["groups"].items():
             if lv != level:
                 continue
             lines.append(f"    {group} {cell(matrix)}")
-            for name, flv, fg, _, _ in FIELDS:
-                if (flv, fg) == (lv, group):
+            for name, key in result["group_of"].items():
+                if key == (lv, group):
                     lines.append(
                         f"      {name:24} raw {cell(result['raw'][name]):>6}  calibrated {cell(result['fields'][name])}"
                     )
@@ -727,6 +860,7 @@ def main() -> None:
         for n in names
     ]
     result = score(kits, args.calibration)
+    kinds = KIND_OF | {name: kind for name, _, kind, _ in ARCS}
 
     report = {
         "videos": names,
@@ -736,7 +870,7 @@ def main() -> None:
                 "name": name,
                 "level": level,
                 "group": group,
-                "kind": kind,
+                "kind": kinds[name],
                 "pairs": int(
                     (
                         ~np.isnan(
@@ -745,7 +879,7 @@ def main() -> None:
                     ).sum()
                 ),
             }
-            for name, level, group, kind, _ in FIELDS
+            for name, (level, group) in result["group_of"].items()
         ],
         "distance": {
             **{lv: _round(m) for lv, m in result["levels"].items()},
@@ -761,7 +895,7 @@ def main() -> None:
                 {
                     n: f
                     for n, f in result["fields"].items()
-                    if scope in ("overall", LEVEL_OF[n])
+                    if scope in ("overall", result["group_of"][n][0])
                 },
                 result["values"],
                 names,
