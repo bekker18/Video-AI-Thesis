@@ -55,7 +55,9 @@ live one level down, moved there after their runs: `tests/` (the test clips), `a
 | `--width 640`                 | source           | resize frames, keeping aspect ratio                                   |
 | `--quality 95`                | `95`           | jpeg quality, 0 (worst) to 100 (best)                                 |
 | `--image-format png`          | `jpg`          | frame file format                                                     |
-| `--keyframes 3`               | `3`            | representative frames kept per shot                                   |
+| `--keyframe-every 3`          | `3`            | seconds of a shot per keyframe, so long shots get more                |
+| `--keyframes-min 3`           | `3`            | fewest keyframes in a shot                                            |
+| `--keyframes-max 10`          | `10`           | most keyframes in a shot                                              |
 | `--shot-mode clean_shot`      | `default`      | `clean_shot` drops transitions, keeping only cuts                   |
 | `--shot-overlap 30`           | `30`           | frames shared between adjacent detection windows                      |
 | `--detector yolo11m`          | `yolo11s`      | object detector: yolo11n/s/m or rtdetr-l                              |
@@ -85,10 +87,10 @@ live one level down, moved there after their runs: `tests/` (the test clips), `a
 | `--blendshapes 10`            | `10`           | blendshape coefficients kept per sample                               |
 | `--attributes 8`              | `8`            | zero-shot face attributes kept per crop                               |
 | `--pose-threads 8`            | `8`            | pose landmarkers 07 runs in parallel                                  |
-| `--identity-face-within 0.55` | `0.55`         | face cosine a link needs inside a segment                             |
-| `--identity-face-across 0.45` | `0.45`         | face cosine a link needs across segments                              |
-| `--identity-body-within 0.70` | `0.70`         | body cosine a link needs inside a segment                             |
-| `--identity-body-across 0.60` | `0.60`         | body cosine a link needs across segments                              |
+| `--identity-face-within 0.311` | `0.311`       | face cosine a link needs inside a segment                             |
+| `--identity-face-across 0.449` | `0.449`       | face cosine a link needs across segments                              |
+| `--identity-body-within 0.575` | `0.575`       | body cosine a link needs inside a segment                             |
+| `--identity-body-across 0.512` | `0.512`       | body cosine a link needs across segments                              |
 | `--identity-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted               |
 | `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor               |
 | `--agg-top 10`                | `10`           | labels kept per distribution in 09                                    |
@@ -109,7 +111,8 @@ live one level down, moved there after their runs: `tests/` (the test clips), `a
 
 `12-identikit` writes `data/processed/<video>/identikit.json`: the video's plastic, figurative
 and enunciative levels under a shared timeline, one record per person, the relations between
-them, where each field came from. It is written compact; `python -m json.tool identikit.json`
+them, where each field came from. Each segment also has a `keyframes` list in each level, so the
+order inside a shot stays in the record. It is written compact; `python -m json.tool identikit.json`
 prints it indented.
 
 ## Preview the output
@@ -275,8 +278,10 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate
 A FRESCO-style distance between every pair of processed videos, from their `identikit.json` files
 only: one distance per field, calibrated over the collection, averaged per plastic, figurative and
 enunciative level. In tags, places, objects and animals a label counts more the fewer videos carry
-it. It lists each video's nearest, k-medoids clusters with what each shares, and can break one pair
-down field by field. Runs in seconds, on the host or in the container.
+it. An arc group in each level compares how a video changes from keyframe to keyframe, so order
+counts too; an identikit without keyframe lists is refused until its video is rerun. It lists each
+video's nearest, k-medoids clusters with what each shares, and can break one pair down field by
+field. Runs in seconds, on the host or in the container.
 
 ```bash
 # every video folder directly under --processed, or name some; writes data/score/similarity.json
