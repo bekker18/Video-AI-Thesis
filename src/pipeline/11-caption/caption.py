@@ -11,8 +11,8 @@ from typing import Any, TypeAlias
 import cv2
 import numpy as np
 
-from src.tools import download_models
 from config import Config
+from src.tools import download_models
 
 STAGE = "11-caption"
 SEGMENTER = "02-segmentation"  # MobileCLIP cache is reused from there
@@ -22,8 +22,8 @@ PANOPTIC_MODEL = "facebook/mask2former-swin-tiny-coco-panoptic"
 
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 
-MAX_WORDS = 12
-MAX_TOKENS = 40
+MAX_WORDS = 30
+MAX_TOKENS = 100
 TOP = 5  # labels kept per hint line
 ADDRESS = 0.5  # share of a person's samples into the camera for the hint to say so
 ANIMALS = frozenset(
