@@ -416,39 +416,36 @@ ARCS: tuple[tuple[str, str, str, Callable[[Kit], Seq | None]], ...] = (
 )
 
 
-def _arc_transitions(seqs: list[Seq | None], kind: str) -> Array:
-    """The mix of changes from one keyframe to the next, each weighted by the two keyframes' time: label to
-    label, or rising, falling and flat for a number."""
+def flat_step(seqs: list[Seq | None], kind: str) -> float:
+    """A number's step below this counts as flat: FLAT times these videos' median non-zero step."""
     steps = [
         abs(float(y[2]) - float(x[2]))
         for s in seqs
         if s and kind == "number"
         for x, y in pairwise(s)
     ]
-    flat = (
-        FLAT * float(np.median([d for d in steps if d > 0]))
-        if any(d > 0 for d in steps)
-        else 0.0
-    )
+    moved = [d for d in steps if d > 0]
+    return FLAT * float(np.median(moved)) if moved else 0.0
+
+
+def transition_mix(seq: Seq | None, kind: str, flat: float) -> Mix | None:
+    """The mix of changes from one keyframe to the next, each weighted by the two keyframes' time: label to
+    label, or rising, falling and flat for a number."""
+    if not seq or len(seq) < 2:
+        return None
 
     def label(v: Any) -> str:
         return max(v, key=v.get)
 
-    mixes: list[Mix | None] = []
-    for seq in seqs:
-        if not seq or len(seq) < 2:
-            mixes.append(None)
-            continue
-        weights: dict[str, float] = {}
-        for (s0, e0, v0), (s1, e1, v1) in pairwise(seq):
-            if kind == "mix":
-                key = f"{label(v0)} > {label(v1)}"
-            else:
-                step = float(v1) - float(v0)
-                key = "rising" if step > flat else "falling" if step < -flat else "flat"
-            weights[key] = weights.get(key, 0.0) + (e0 - s0) + (e1 - s1)
-        mixes.append(_mix(weights))
-    return _mix_distance(mixes)
+    weights: dict[str, float] = {}
+    for (s0, e0, v0), (s1, e1, v1) in pairwise(seq):
+        if kind == "mix":
+            key = f"{label(v0)} > {label(v1)}"
+        else:
+            step = float(v1) - float(v0)
+            key = "rising" if step > flat else "falling" if step < -flat else "flat"
+        weights[key] = weights.get(key, 0.0) + (e0 - s0) + (e1 - s1)
+    return _mix(weights)
 
 
 def _blank(values: list[Any], out: Array) -> Array:
@@ -599,6 +596,7 @@ def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
     fields: dict[str, Array] = {}
     values: dict[str, list[Any]] = {}
     group_of: dict[str, tuple[str, str]] = {}
+    flats: dict[str, float] = {}
     for name, level, group, kind, read in FIELDS:
         values[name] = [read(kit) for kit in kits]
         raw[name] = DISTANCES[kind](
@@ -608,7 +606,10 @@ def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
         group_of[name] = (level, group)
     for name, level, kind, read in ARCS:
         values[name] = [read(kit) for kit in kits]
-        raw[name] = _arc_transitions(values[name], kind)
+        flats[name] = flat_step(values[name], kind)
+        raw[name] = _mix_distance(
+            [transition_mix(v, kind, flats[name]) for v in values[name]]
+        )
         fields[name] = _calibrate(raw[name], "mix", method)
         group_of[name] = (level, "arc")
     filled = {name: _impute(m, _lacks(values[name])) for name, m in fields.items()}
@@ -627,6 +628,8 @@ def score(kits: list[Kit], method: str = "scale") -> dict[str, Any]:
         "groups": groups,
         "levels": levels,
         "overall": _nanmean(list(levels.values())),
+        "order": _nanmean([m for (_, g), m in groups.items() if g == "arc"]),
+        "flats": flats,
         "group_of": group_of,
     }
 
@@ -884,7 +887,9 @@ def main() -> None:
         "distance": {
             **{lv: _round(m) for lv, m in result["levels"].items()},
             "overall": _round(result["overall"]),
+            "order": _round(result["order"]),  # the arc groups alone, not a level
         },
+        "arc_flat": {k: round(v, 6) for k, v in result["flats"].items()},
         "nearest": {
             scope: _nearest(m, names, args.top)
             for scope, m in (("overall", result["overall"]), *result["levels"].items())

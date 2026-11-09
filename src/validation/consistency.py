@@ -27,9 +27,9 @@ Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
 Video: TypeAlias = dict[str, Any]  # name, folder, caption, keyframes
 Totals: TypeAlias = dict[str, Array]
 
-AVE, REELS = COLLECTIONS = ("ave", "reels")
-NAMES = {AVE: "AVE film scenes", REELS: "Instagram reels"}
-SHORT = {AVE: "AVE", REELS: "reels"}
+AVE, DIOR = COLLECTIONS = ("ave", "diorreels")
+NAMES = {AVE: "AVE film scenes", DIOR: "Dior reels"}
+SHORT = {AVE: "AVE", DIOR: "Dior"}
 MIN_N = 20  # videos needed to judge
 FACE_INPUT = 640  # fixed YuNet input: a size per image makes it return phantom faces, so does 1280
 FACE_CONF = 0.6  # 03's --face-conf
@@ -95,7 +95,7 @@ PAIRS = (
 )
 PARTS = ("first", "common", "second")
 
-# Table 6: name, item, model a, model b; plausibility.py's checks and bands, set before its first run
+# Table 6: name, item, model a, model b; checks and bands set before the first run
 AGREEMENTS = (
     (
         "smile",
@@ -370,7 +370,6 @@ def _video(root: Path, ave: dict[str, Any]) -> Video:
     return {
         "name": root.name,
         "folder": root.parent.name,
-        "pass_zero": "same_face" in (identity.get("thresholds") or {}),
         "caption": json.loads(caption.read_text(encoding="utf-8"))["caption"]
         if caption.exists()
         else None,
@@ -423,10 +422,10 @@ def _faces(detector: Any, path: Path) -> int:
     return sum(1 for row in found if bool(np.isfinite(row[:4]).all()))
 
 
-def _add_faces(videos: list[Video], cache: Path) -> None:
+def _add_faces(videos: list[Video], path: Path) -> None:
     """YuNet over each whole keyframe, cached beside the report for these videos only."""
     found: dict[str, int] = (
-        json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else {}
+        json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     )
     kept: dict[str, int] = {}
     detector: Any = None
@@ -440,8 +439,8 @@ def _add_faces(videos: list[Video], cache: Path) -> None:
                     )
                 found[name] = _faces(detector, k["path"])
             k["faces"] = kept[name] = found[name]
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(kept, sort_keys=True), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(kept, sort_keys=True), encoding="utf-8")
 
 
 def _fit(image: Array, longest: int) -> Array:
@@ -502,11 +501,11 @@ def _mask2former() -> tuple[Any, Any, dict[int, str]]:
     return model, processor, {int(i): str(n) for i, n in model.config.id2label.items()}
 
 
-def _add_things(videos: list[Video], cache: Path) -> None:
+def _add_things(videos: list[Video], path: Path) -> None:
     """Mask2Former's things on each keyframe, all of them: 05 keeps the 10 largest segments. Cached for
     these videos only."""
     found: dict[str, Any] = (
-        json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else {}
+        json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     )
     kept: dict[str, Any] = {}
     loaded: tuple[Any, Any, dict[int, str]] | None = None
@@ -529,7 +528,7 @@ def _add_things(videos: list[Video], cache: Path) -> None:
 
         del loaded
         torch.cuda.empty_cache()
-    cache.write_text(json.dumps(kept, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(kept, sort_keys=True), encoding="utf-8")
 
 
 def _rerun_check(videos: list[Video]) -> dict[str, float]:
@@ -1205,7 +1204,7 @@ def _encoders(
 
 PAGE_SIZE = (22.4, 13.5)  # inches at 100 dpi
 INK, SECONDARY, MUTED = "#0b0b0b", "#52514e", "#898781"
-PAGE, HAIRLINE = "#f9f9f7", "#e1e0d9"
+PAGE = "#f9f9f7"
 STATUS = {
     "pass": "#0ca30c",
     "weak": "#fab219",
@@ -1269,7 +1268,7 @@ def _people_page(path: Path, report: dict[str, Any]) -> None:
         "source",
         "AVE: with a person",
         "per keyframe",
-        "reels: with a person",
+        "Dior: with a person",
         "per keyframe",
         "FRESCO OpenImages",
         "per image",
@@ -1307,10 +1306,10 @@ def _people_page(path: Path, report: dict[str, Any]) -> None:
         (
             f"Mask2Former is run again here as 05 runs it, every segment kept: 05 keeps 10 a keyframe, and cut "
             f"the list in {_pct(report['collections'][AVE]['cut_share'])} of AVE keyframes and "
-            f"{_pct(report['collections'][REELS]['cut_share'])} of reels keyframes. Where it did not, the rerun "
+            f"{_pct(report['collections'][DIOR]['cut_share'])} of Dior keyframes. Where it did not, the rerun "
             f"finds the same persons in "
             f"{_pct(report['collections'][AVE]['mask2former_rerun']['persons_match_uncut'])} and "
-            f"{_pct(report['collections'][REELS]['mask2former_rerun']['persons_match_uncut'])}."
+            f"{_pct(report['collections'][DIOR]['mask2former_rerun']['persons_match_uncut'])}."
         ),
         (
             "The tags are MobileCLIP's top 15 per keyframe over RAM's vocabulary, zero-shot with no score "
@@ -1321,12 +1320,6 @@ def _people_page(path: Path, report: dict[str, Any]) -> None:
             "more and counts as 5."
         ),
     ]
-    for c in COLLECTIONS:
-        if report["collections"][c]["without_pass_zero"]:
-            notes.append(
-                f"{report['collections'][c]['without_pass_zero']} of the {NAMES[c]} predate 08's pass zero, "
-                "so a person boxed twice there still counts twice."
-            )
     for c in COLLECTIONS:
         m = report["router_misses"][c]
         notes.append(
@@ -1455,7 +1448,7 @@ def _agreement_page(path: Path, report: dict[str, Any]) -> None:
         "AVE: n",
         "Spearman [95% CI]",
         "result",
-        "reels: n",
+        "Dior: n",
         "Spearman [95% CI]",
         "result",
     ]
@@ -1564,7 +1557,7 @@ def main() -> None:
     p.add_argument("--processed", type=Path, default=ROOT / "data" / "processed")
     p.add_argument(
         "--ave",
-        default="ave_processed",
+        default="ave",
         help="the AVE scenes' folder under --processed",
     )
     p.add_argument(
@@ -1594,7 +1587,7 @@ def main() -> None:
         if args.labels.exists()
         else {}
     )
-    folders = {AVE: args.ave, REELS: REELS}
+    folders = {AVE: args.ave, DIOR: DIOR}
     videos = _load(args.processed, folders, ave)
     if any(len(videos[c]) < MIN_N for c in COLLECTIONS):
         sys.exit(
@@ -1623,7 +1616,6 @@ def main() -> None:
             c: {
                 "folder": folders[c],
                 "videos": len(videos[c]),
-                "without_pass_zero": sum(1 for v in videos[c] if not v["pass_zero"]),
                 "keyframes": sum(len(v["keyframes"]) for v in videos[c]),
                 "cut_share": round(
                     sum(k["cut"] for v in videos[c] for k in v["keyframes"])

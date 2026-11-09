@@ -1,39 +1,89 @@
 # Video AI Thesis
 
-A modular video processing pipeline.
+Turns a video into an **identikit**: one JSON record of how the video looks (plastic level), what it
+shows (figurative level) and how it is filmed (enunciative level), over a shared timeline. A
+FRESCO-style score then compares videos through their identikits, including how each one changes
+from keyframe to keyframe.
 
-## Local venv
+| Stage                      | What it does                                                             |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `01-sampling`            | optional: writes frames to disk                                          |
+| `02-segmentation`        | shot cuts (OmniShotCut) and keyframes (MobileCLIP): one per 3 s, 3 to 10 |
+| `03-profiler`            | what each keyframe holds (YOLO11)                                        |
+| `04-router`              | which experts run on which shot                                          |
+| `05-global-experts`      | scene, tags, depth, segmentation and colour per keyframe                 |
+| `06-detection-tracking`  | people and faces, tracked within each shot                               |
+| `07-conditional-experts` | pose, gaze, emotion, age, gender and text on the tracks                  |
+| `08-identity`            | joins tracks into people across shots                                    |
+| `09-aggregation`         | statistics per person, per shot and per keyframe; camera movement        |
+| `10-relations`           | who looks at whom, and whose emotions move together                      |
+| `11-caption`             | one sentence for the video (Qwen3-VL)                                    |
+| `12-identikit`           | assembles `identikit.json`                                             |
 
-```bash
-uv sync
-```
+To replicate everything, follow the sections in order; [section 9](#9-replication-order-and-limits)
+is the checklist. Commands run from the repository root, in Git Bash or a Linux shell. Replace
+`YYYY-MM-DD` with the date, so that earlier reports are kept.
 
-Installs everything into `.venv/` on Python 3.10. Point your editor at it, or prefix
-commands with `uv run`. The full pipeline still wants the container, for ffmpeg and CUDA.
+## 1. Setup
 
-## Build
+You need Docker with NVIDIA GPU support and [uv](https://docs.astral.sh/uv/). The times below were
+measured on an RTX 4070 Laptop GPU (8 GB).
 
 ```bash
 docker compose build
+uv sync   # optional: a local .venv on Python 3.10, for your editor
 ```
 
-## Run
+## 2. Model weights
+
+Weights (9 GB) go to `models/`. They download automatically before each stage; to fetch them all first:
+
+```bash
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_models
+```
+
+## 3. Datasets
+
+| Dataset     | Used for                        | How to get it                                                                                       | Size   | Folder                            |
+| ----------- | ------------------------------- | --------------------------------------------------------------------------------------------------- | ------ | --------------------------------- |
+| AVE         | pipeline, validation            | command below                                                                                       | 2.1 GB | `data/raw/ave/`                 |
+| Dior reels  | pipeline, validation, score     | **not public**: supply your own `.mp4` files                                                | 7.6 GB | `data/raw/diorreels/diorreels/` |
+| Test clips  | sanity checks                   | **not public**: `anime`, `cat1`, `cat2`, `messi`, `neymar`, `patrick`, `thanos` | small  | `data/raw/test/`                |
+| CameraBench | camera movement (09)            | [section 8](#camera-movement-on-camerabench)                                                         | 4.1 GB | `data/raw/camerabench/`         |
+| ShotBench   | shot size (12)                  | [section 8](#shot-size-on-shotbench)                                                                 | 341 MB | `data/raw/shotbench/`           |
+| UCO-LAEO    | who looks at whom (10)          | [section 8](#looks-at-on-uco-laeo)                                                                   | 4.1 GB | `data/raw/ucolaeo/`             |
+| VSGaze      | the MTGS comparison on UCO-LAEO | [section 8](#looks-at-on-uco-laeo)                                                                   | 103 MB | `data/raw/vsgaze/`              |
+| VPCD        | identity (08)                   | [section 8](#identity-on-vpcd)                                                                       | 5.7 GB | `data/raw/vpcd/`                |
+
+AVE's labels and a seeded sample of its scenes come from [AVE](https://github.com/dawitmureja/AVE).
+The videos come from YouTube; removed ones are skipped and listed in `unavailable.txt`.
+
+```bash
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave --count 100
+```
+
+## 4. Run the pipeline
+
+### One video
 
 ```bash
 # whole pipeline
 docker compose run --rm pipeline data/raw/test/messi.mp4
 
-# one module on its own
+# one stage on its own, once its inputs exist
 docker compose run --rm pipeline data/raw/test/messi.mp4 --stages 02-segmentation
+
+# every option and its default
+docker compose run --rm pipeline --help
 ```
 
 Output lands in `data/processed/<video_name>/`:
 
 ```
-identikit.json   the terminal artifact (12)
+identikit.json   the final record (12)
 json/            every other stage's metadata
 embeddings/      keyframe, face and body vectors (.npy)
-previews/        rendered inspection videos and the identikit page
+previews/        rendered videos and pages, from section 5
 frames/          decoded frames        (01)
 shots/           first frame per shot  (02)
 keyframes/       representative frames (02)
@@ -41,253 +91,230 @@ global/          dense maps per keyframe (05)
 tracks/          best crops per track  (06)
 ```
 
-`json/`, `embeddings/` and `previews/` are created on first use. The processed collections
-live one level down, moved there after their runs: `tests/` (the test clips), `ave/` and
-`ave_processed/` (AVE scenes) and `reels/`.
+The options you are most likely to change:
 
-## Options
+| Flag                            | Default         | Meaning                                                |
+| ------------------------------- | --------------- | ------------------------------------------------------ |
+| `--stages <name> ...`         | all but 01      | run a subset, always in pipeline order                 |
+| `--device cpu\|cuda\|auto`      | `auto`        | where models run                                       |
+| `--keyframe-every 3`          | `3`           | seconds of a shot per keyframe, so long shots get more |
+| `--keyframes-min 3`           | `3`           | fewest keyframes in a shot                             |
+| `--keyframes-max 10`          | `10`          | most keyframes in a shot                               |
+| `--detector yolo11m`          | `yolo11s`     | yolo11n/s/m or rtdetr-l                                |
+| `--det-stride 1`              | `2`           | detect every Nth frame; the rest are interpolated      |
+| `--series-stride 2`           | `2`           | observed rows between samples in 07                    |
+| `--caption-model qwen3-vl-4b` | `qwen3-vl-2b` | captioner used by 11                                   |
+| `--caption-frames 8`          | `8`           | keyframes shown to the captioner                       |
 
-| flag                            | default          | meaning                                                               |
-| ------------------------------- | ---------------- | --------------------------------------------------------------------- |
-| `--stages <name> ...`         | all but 01       | run a subset, always in pipeline order; 01 only when named            |
-| `--device cpu\|cuda\|auto`      | `auto`         | where models run                                                      |
-| `--fps 5`                     | every frame      | sample rate for 01-sampling                                           |
-| `--width 640`                 | source           | resize frames, keeping aspect ratio                                   |
-| `--quality 95`                | `95`           | jpeg quality, 0 (worst) to 100 (best)                                 |
-| `--image-format png`          | `jpg`          | frame file format                                                     |
-| `--keyframe-every 3`          | `3`            | seconds of a shot per keyframe, so long shots get more                |
-| `--keyframes-min 3`           | `3`            | fewest keyframes in a shot                                            |
-| `--keyframes-max 10`          | `10`           | most keyframes in a shot                                              |
-| `--shot-mode clean_shot`      | `default`      | `clean_shot` drops transitions, keeping only cuts                   |
-| `--shot-overlap 30`           | `30`           | frames shared between adjacent detection windows                      |
-| `--detector yolo11m`          | `yolo11s`      | object detector: yolo11n/s/m or rtdetr-l                              |
-| `--det-conf 0.4`              | `0.25`         | detection confidence threshold                                        |
-| `--face-conf 0.6`             | `0.6`          | face detection confidence threshold                                   |
-| `--text-conf 0.5`             | `0.5`          | text region confidence threshold                                      |
-| `--scenes 3`                  | `3`            | scene labels kept per shot                                            |
-| `--router-agreement 0.5`      | `0.0`          | soft gate: fraction of a shot's keyframes a flag must hold in         |
-| `--map-size 512`              | `512`          | longest side of every dense map written by 05                         |
-| `--seg-model segformer-b1`    | `segformer-b1` | semantic model: segformer-b0/b1/b2                                    |
-| `--seg-top 10`                | `10`           | classes or segments kept per keyframe                                 |
-| `--tags 15`                   | `15`           | zero-shot tags kept per keyframe                                      |
-| `--expert-batch 8`            | `8`            | keyframes per forward pass in 05                                      |
-| `--tracker botsort`           | `bytetrack`    | tracker used by 06                                                    |
-| `--frame-source frames`       | `video`        | `frames` reads 01-sampling's output instead of decoding             |
-| `--det-stride 1`              | `2`            | detect every Nth frame; the rest are interpolated                     |
-| `--track-low-conf 0.1`        | `0.1`          | floor for ByteTrack's second association pass                         |
-| `--track-high-conf 0.25`      | `0.25`         | first association pass takes detections above this                    |
-| `--track-new-conf 0.25`       | `0.25`         | a new track starts only above this                                    |
-| `--track-buffer 30`           | `30`           | frames a lost track survives before it is dropped                     |
-| `--track-match 0.8`           | `0.8`          | IoU distance a match must beat                                        |
-| `--track-batch 16`            | `16`           | frames per detector forward pass in 06                                |
-| `--crops 5`                   | `5`            | best crops kept per track, per kind                                   |
-| `--crop-pad 0.1`              | `0.1`          | fraction of the box added as margin                                   |
-| `--min-track 3`               | `3`            | tracks shorter than this are dropped                                  |
-| `--series-stride 2`           | `2`            | observed rows between series samples in 07                            |
-| `--blendshapes 10`            | `10`           | blendshape coefficients kept per sample                               |
-| `--attributes 8`              | `8`            | zero-shot face attributes kept per crop                               |
-| `--pose-threads 8`            | `8`            | pose landmarkers 07 runs in parallel                                  |
-| `--identity-face-within 0.311` | `0.311`       | face cosine a link needs inside a segment                             |
-| `--identity-face-across 0.449` | `0.449`       | face cosine a link needs across segments                              |
-| `--identity-body-within 0.575` | `0.575`       | body cosine a link needs inside a segment                             |
-| `--identity-body-across 0.512` | `0.512`       | body cosine a link needs across segments                              |
-| `--identity-min-area 1600`    | `1600`         | crop pixel area below which a descriptor is not trusted               |
-| `--identity-min-front 0.15`   | `0.15`         | frontality a face crop needs to contribute a descriptor               |
-| `--agg-top 10`                | `10`           | labels kept per distribution in 09                                    |
-| `--pose-vis 0.5`              | `0.5`          | visibility a joint must reach to count in 09                          |
-| `--address-deg 15`            | `15`           | head-pose cone around the camera axis that counts as address          |
-| `--sync-min 5`                | `5`            | shared affect samples a synchrony edge needs                          |
-| `--caption-model qwen3-vl-4b` | `qwen3-vl-2b`  | captioner used by 11                                                  |
-| `--caption-frames 8`          | `8`            | keyframes shown to the captioner                                      |
-| `--caption-size 448`          | `448`          | longest side of each keyframe given to the captioner                  |
-| `--relation-share 0.5`        | `0.5`          | share of one's gaze samples on the other before 12 lists a relation   |
-| `--relation-min 3`            | `3`            | gaze samples that share must rest on                                  |
-| `--identikit-labels 3`        | `3`            | labels kept per segment and per person in the identikit               |
-| `--subject-min 0.25`          | `0.25`         | share of a segment's detection frames an animal needs to be a subject |
-| `--object-min 0.1`            | `0.1`          | share of a segment's detection frames an object needs to be listed    |
-| `--object-frames 3`           | `3`            | detection frames an object needs to be listed                         |
+### A whole collection
 
-## The identikit
-
-`12-identikit` writes `data/processed/<video>/identikit.json`: the video's plastic, figurative
-and enunciative levels under a shared timeline, one record per person, the relations between
-them, where each field came from. Each segment also has a `keyframes` list in each level, so the
-order inside a shot stays in the record. It is written compact; `python -m json.tool identikit.json`
-prints it indented.
-
-## Preview the output
-
-Draws what 06, 07, 08 and 10 produced back over the source video, for inspection, and 12's
-identikit as a page.
+Each video's output is moved into a collection folder. Finished videos are skipped, so you can stop
+and restart at any time. A third argument processes only that many videos: a fixed random sample, so
+the same clips come up each time and a larger number adds to them.
 
 ```bash
-# all views; the name is the folder under data/processed
+run_collection() {  # <folder of .mp4 files> <collection name under data/processed> [how many, default all]
+  mkdir -p "data/processed/$2" "data/logs/$2"
+  LC_ALL=C ls "$1"/*.mp4 | awk 'BEGIN { srand(0) } { print rand(), $0 }' | LC_ALL=C sort -n |
+    cut -d' ' -f2- | head -n "${3:-1000000}" | while read -r v; do
+    id=$(basename "$v" .mp4)
+    [ -f "data/processed/$2/$id/identikit.json" ] && continue
+    if docker compose run --rm -T pipeline "$v" > "data/logs/$2/$id.log" 2>&1 < /dev/null; then
+      mv "data/processed/$id" "data/processed/$2/"
+    else
+      echo "FAILED $id"
+    fi
+  done
+}
+
+run_collection data/raw/test tests
+run_collection data/raw/ave ave_processed
+run_collection data/raw/diorreels/diorreels diorreels
+run_collection data/raw/diorreels/diorreels diorreels 100
+```
+
+Validation uses the first 50 AVE scenes, which no threshold was fitted on:
+
+```bash
+mkdir -p data/processed/ave
+LC_ALL=C ls data/processed/ave_processed | head -50 | while read -r id; do
+  cp -r "data/processed/ave_processed/$id" data/processed/ave/
+done
+```
+
+Expect about 100 MB of output per minute of video, so roughly 100 GB for the Dior reels.
+
+## 5. Previews
+
+Draws what the stages produced over the source video, and the identikit as a page. The name is the
+folder under `data/processed`.
+
+| View            | Shows                                                                                                      |
+| --------------- | ---------------------------------------------------------------------------------------------------------- |
+| `tracks`      | 06: person boxes, dashed where interpolated, faces, and the frames chosen as crops                         |
+| `conditional` | 07: pose, head pose, gaze, emotion with valence and arousal, recognised text                               |
+| `identity`    | 08: global person ids over the same boxes                                                                  |
+| `relations`   | 10: where each gaze lands, who looks at whom, synchrony                                                    |
+| `identikit`   | 12: the record as a page, then a second page, *Order over keyframes*, with every arc the score compares  |
+| `similarity`  | the score's ranking, after FRESCO's Figure 11, with the order-only ranking. Only when named; see section 6 |
+
+```bash
+# one clip, all views (similarity excluded)
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi
 
-# just one
+# one clip, one view
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi --views relations
+
+# a whole collection, identikit pages only
+docker compose run --rm -T --entrypoint bash pipeline -c '
+for d in data/processed/diorreels/*/; do
+  python3 -m src.tools.preview "diorreels/$(basename "$d")" --views identikit
+done'
 ```
 
-Writes `data/processed/<video>/previews/<view>_preview.mp4`, `identikit.png` for the page, and
-`similarity.png` when `--views similarity` is named.
+Files appear in `data/processed/<video>/previews/`: `<view>_preview.mp4`, `identikit.png` and
+`similarity.png`. For a collection, drop `--views identikit` to render every video view too; that is
+slow and takes a lot of disk.
 
-| view            | shows                                                                                                                   |
-| --------------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `tracks`      | 06 — person boxes, solid where detected and dashed where interpolated, faces in white, and the frames chosen as crops  |
-| `conditional` | 07 — pose skeleton, head-pose axes, gaze line to its point (or "out"), emotion with valence/arousal, recognised text   |
-| `identity`    | 08 — global person ids over the same boxes as`tracks`, so what merged is visible against it                          |
-| `relations`   | 10 — white: where each gaze lands; grey: the heads it can land on, a line down the box for someone without a face; amber where, in this segment, half a person's looks are aimed at the other's head; green both ways; cyan synchrony |
-| `identikit`   | 12 — the identikit as one page: timeline, plastic, figurative and enunciative levels, and what could not be determined |
-| `similarity`  | the score's ranking, after FRESCO's Figure 11: the video, then its 8 nearest, median and farthest by each level. Only when named, after `python3 -m src.score.similarity` |
+## 6. Similarity between videos
 
-## Download model weights
-
-Runs automatically before each stage; anything already in `models/` is reused.
-To prefetch everything up front:
+A distance between every pair of processed videos, from their `identikit.json` files only: one distance
+per field, calibrated over the collection, averaged per plastic, figurative and enunciative level.
+Each level also has an **arc group**, which compares how a video changes from keyframe to keyframe.
+It reports each video's nearest neighbours and k-medoids clusters. Only videos in the same folder are
+compared, and identikits written before the keyframe lists existed are refused until their video is
+rerun.
 
 ```bash
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_models
+# score a collection
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
+  --processed data/processed/diorreels --out data/score/diorreels_YYYY-MM-DD.json
+
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
+  --processed data/processed/ave_processed --out data/score/ave_YYYY-MM-DD.json
+
+# also print one pair, field by field, and choose the number of clusters
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
+  --processed data/processed/tests --out data/score/tests_YYYY-MM-DD.json --clusters 3 --explain messi anime
+
+# one video's nearest, median and farthest, by level and by order alone
+docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview \
+  diorreels/<video_name> --views similarity --score data/score/diorreels_YYYY-MM-DD.json
 ```
 
-## AVE dataset
+## 7. Validation on AVE and Dior reels
 
-Labels and a seeded random sample of scenes from [AVE](https://github.com/dawitmureja/AVE),
-into `data/raw/ave/`. Videos come from YouTube; deleted or region-blocked ones are skipped
-and listed in `unavailable.txt`.
+Each report lands where `--out` says, with its figures beside it.
 
-```bash
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave --count 200
-```
-
-## Validate on AVE
-
-Run the whole pipeline on each scene, move its output into a collection folder, then score every
-scene in that folder against AVE's per-shot labels. The first 50 scenes through the current pipeline
-are in `data/processed/ave/`; `data/processed/ave_processed/` holds 100 scenes of an earlier run.
+**Against AVE's per-shot labels** (AVE only, since Dior has no labels):
 
 ```bash
-# per scene, 02-12 at the defaults; the output lands in data/processed/<id>/ and is moved
-mkdir -p data/processed/ave
-for v in data/raw/ave/*.mp4; do
-  id=$(basename "$v" .mp4)
-  docker compose run --rm -T pipeline "$v" && mv "data/processed/$id" data/processed/ave/
-done
-
-# score, naming the report by date
+# every scene against AVE's labels
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py \
-  --processed data/processed/ave --out data/validation/ave_YYYY-MM-DD.json
-```
+  --processed data/processed/ave --out data/validation/ave_50_YYYY-MM-DD.json
 
-`--iou` (0.5) sets the overlap a pipeline shot needs to be compared with an AVE shot, and
-`--tolerance` (2) how many frames a detected cut may be off. Relative paths, as here, need no
-`MSYS_NO_PATHCONV` in Git Bash; an `/app/...` path does.
-
-## Distributions
-
-Our version of FRESCO's Figures 9 and 10: every identikit field's distribution for the AVE scenes
-and the reels (`data/processed/reels`), with the test clips (`data/processed/tests`) as marks, and
-expectations about them checked against intervals from resampled videos. `--ave` names the AVE
-folder under `data/processed` (default `ave_processed`; the current reports use `ave`). Beside the
-report it draws three pages: the verdicts (`.png`), the numeric fields (`_numeric.png`) and the
-categorical ones (`_categorical.png`).
-
-```bash
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py \
-  --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
-```
-
-## Consistency across models
-
-Our version of FRESCO's Tables 3-5, per keyframe of the AVE scenes and the reels: how often each model
-finds a person and how many, group sizes, and the topics their labels share, matched by CLIP ViT-L/14's
-text similarity as in FRESCO and set against chance; plus five checks of two models measuring the
-same thing. Expectations are checked against intervals from resampled videos. `--ave` names the AVE
-folder, as for distributions, and `--encoders` also compares CLIP with the pipeline's MobileCLIP
-into `<report>_encoders.json`. Beside the report it draws five pages (`.png`, `_people`, `_groups`,
-`_topics`, `_agreement`) and caches YuNet's faces on whole keyframes (`faces_yunet.json`) and
-Mask2Former run again with every segment (`things_mask2former.json`); CLIP's weights (1.6 GB) are
-fetched into `models/validation/` on the first run.
-
-```bash
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py \
-  --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
-```
-
-## Contrasts on AVE's labels
-
-Groups that AVE's labels tell apart, against the pipeline's values there: exterior shots should
-read more outdoor than interior ones, close-ups should show bigger faces than wide shots, and so on
-for 11 contrasts. Each is an AUC with an interval from resampled scenes, and a planted dead model
-must fail to pass. `--processed` is the AVE folder itself. Beside the report it draws one page.
-
-```bash
+# 11 groups the labels tell apart, such as exterior against interior
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py \
   --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
 ```
 
-## Tuning camera movement on AVE
-
-09's camera rule and changes to it, against AVE's `shot-motion` labels. `pairs` fits every frame pair
-once, as 09 does, into `data/validation/camera/pairs/` (about 10 minutes; `--stride 2` adds the
-half-frame-rate copy the fps check needs). `evaluate` fits each rule on AVE scenes 51-100 and scores
-scenes 1-50, the ones in `data/processed/ave`. `reproduce` checks the cache against 09's stored
-cameras, `sheets` draws the fitted rule's errors and `clips` the test clips under each rule.
+**Distributions and consistency** compare AVE with the Dior reels. Both need at least 20 videos in each
+collection. Expectations are checked against intervals from resampled videos.
 
 ```bash
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs
+# every identikit field's distribution, after FRESCO's Figures 9 and 10; test clips appear as marks
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py \
+  --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
+
+# people and topics across models per keyframe, after FRESCO's Tables 3-5
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py \
+  --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
+```
+
+`consistency` caches YuNet's faces and a Mask2Former rerun beside its report, and fetches CLIP (1.6 GB)
+into `models/validation/` on the first run. Add `--encoders` to also compare CLIP with the pipeline's
+MobileCLIP.
+
+**Refitting 09's camera thresholds** (optional). Each rule is fitted on AVE scenes 51-100 and scored on
+1-50, so `data/processed/ave` must exist:
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave --stride 2
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py evaluate \
   --out data/validation/camera/camera_YYYY-MM-DD.json
 ```
 
-## Camera movement on CameraBench
+## 8. Comparisons with the state of the art
 
-Scores 09's camera rule, as tuned on AVE, on [CameraBench](https://github.com/sy77777en/CameraBench)'s
-1,071 test clips with the benchmark's own scorer, against the methods its paper reports. The download
-(4.4 GB, pinned, about 25 minutes) goes to `data/raw/camerabench/`. `gate` first checks that the box
-and fit code gives 06's and 09's own output on the test clips. `shots` finds cuts with 02's
-OmniShotCut (about 20 minutes), `boxes` tracks people with 06's code on every shot (12), `pairs` fits
-every frame pair with and without the person mask (8), and `score` writes the 15 official score files
-and the report; `roll` draws roll clips to check the roll sign by eye.
+These run on the benchmarks' own data, so they do not need your processed collections, apart from
+CameraBench's `gate` step.
+
+### Camera movement on CameraBench
+
+09's rule on [CameraBench](https://github.com/sy77777en/CameraBench)'s 1,071 test clips, with the
+benchmark's own scorer. `gate` checks the code against 06's and 09's output on the test clips; skip it if
+you do not have them.
 
 ```bash
 docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_camerabench
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py gate
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py shots
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py boxes
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py pairs
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py pairs 
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py score \
   --out data/validation/camera/camerabench_YYYY-MM-DD.json
 ```
 
-## Looks on UCO-LAEO
+### Shot size on ShotBench
 
-Scores 10's `looks_at` rule against [UCO-LAEO](https://uco.es/investiga/grupos/ava/?p=941)'s pairs
-of people looking at each other, sweeping its in-frame cutoff and angle on the non-test videos.
-07's Gaze-LLE output is cached beside the report (about 25 minutes on the GPU the first time), so a
-rerun only rescores.
+12's shot-size rule on ShotBench's shot-size questions.
+
+```bash
+docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_shotbench
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py detect
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py features
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py score \
+  --out data/validation/shot/shotbench_YYYY-MM-DD.json
+```
+
+### Looks-at on UCO-LAEO
+
+10's `looks_at` rule on [UCO-LAEO](https://uco.es/investiga/grupos/ava/?p=941). `--protocol mtgs` scores
+it on MTGS's test pairs from VSGaze, the like-for-like comparison. Gaze-LLE's output is cached beside the
+report (about 25 minutes the first time), so a rerun only rescores.
 
 ```bash
 mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
+uv run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py
+
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --protocol mtgs \
+  --out data/validation/laeo_mtgs_YYYY-MM-DD.json
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py \
   --out data/validation/laeo_YYYY-MM-DD.json
 ```
 
-## Similarity between videos
+### Identity on VPCD
 
-A FRESCO-style distance between every pair of processed videos, from their `identikit.json` files
-only: one distance per field, calibrated over the collection, averaged per plastic, figurative and
-enunciative level. In tags, places, objects and animals a label counts more the fewer videos carry
-it. An arc group in each level compares how a video changes from keyframe to keyframe, so order
-counts too; an identikit without keyframe lists is refused until its video is rerun. It lists each
-video's nearest, k-medoids clusters with what each shares, and can break one pair down field by
-field. Runs in seconds, on the host or in the container.
+08's rule on [VPCD](https://www.robots.ox.ac.uk/~vgg/data/vpcd/)'s person clustering, from its own features.
 
 ```bash
-# every video folder directly under --processed, or name some; writes data/score/similarity.json
-python3 -m src.score.similarity --processed data/processed/ave_processed
-python3 -m src.score.similarity --processed data/processed/tests --clusters 3 --explain messi anime
-# one video's nearest, median and farthest per level, as a page (FRESCO's Figure 11);
-# --score names the report when it is not data/score/similarity.json
-python3 -m src.tools.preview ave_processed/6bxEuaulT4k --views similarity
+docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_vpcd
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_identity.py \
+  --out data/validation/identity/vpcd_YYYY-MM-DD.json
 ```
+
+## 9. Replication order and limits
+
+1. Set up, and fetch the weights (sections 1 and 2).
+2. Download AVE and put the Dior reels and test clips in place (section 3).
+3. Run the test clips, AVE and the Dior reels (section 4).
+4. Draw previews (section 5).
+5. Score the collections and draw similarity pages (section 6).
+6. Run the validators (section 7).
+7. Run the four benchmark comparisons (section 8).
+
+**What cannot be replicated exactly:**
+
+- The Dior reels and test clips are not public, so your numbers on them need your own copies.
+- YouTube removals can change which AVE scenes download.

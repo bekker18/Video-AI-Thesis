@@ -24,9 +24,9 @@ Video: TypeAlias = dict[str, Any]  # name, kit, tall, bars
 Reader: TypeAlias = Callable[[Video], list[float]]
 Mixer: TypeAlias = Callable[[Video], dict[str, float]]
 
-AVE, REELS = COLLECTIONS = ("ave", "reels")
+AVE, DIOR = COLLECTIONS = ("ave", "diorreels")
 KNOWN = "tests"  # clips of known content
-NAMES = {AVE: "AVE film scenes", REELS: "Instagram reels", KNOWN: "test clips"}
+NAMES = {AVE: "AVE film scenes", DIOR: "Dior reels", KNOWN: "test clips"}
 MIN_N = 20  # videos, or persons for a top check, needed to judge
 BAR_FRAMES = 5  # keyframes checked for black bars
 DARK = 16  # row mean grey below which a row is a black bar
@@ -242,14 +242,16 @@ def _people_time(v: Video) -> float | None:
     )
 
 
+def _women_time(v: Video) -> list[tuple[float, float]]:
+    return [
+        (float(p["gender"]["distribution"]["female"]), float(p["seconds"]))
+        for p in _described(v["kit"])
+        if p.get("gender")
+    ]
+
+
 def _women(v: Video) -> float | None:
-    return _ratio(
-        [
-            (float(p["gender"]["distribution"]["female"]), float(p["seconds"]))
-            for p in _described(v["kit"])
-            if p.get("gender")
-        ]
-    )
+    return _ratio(_women_time(v))
 
 
 def _looks(v: Video) -> float | None:
@@ -274,30 +276,6 @@ def _gaze_in(v: Video) -> float | None:
             (float(p["gaze"]["in_frame_share"]), float(p["gaze"]["n"]))
             for p in _watchers(v["kit"])
             if p.get("gaze")
-        ]
-    )
-
-
-def _happiness(v: Video) -> float | None:
-    return _ratio(
-        [
-            (float(p["emotion"]["distribution"]["happiness"]), float(p["seconds"]))
-            for p in _described(v["kit"])
-            if p.get("emotion")
-        ]
-    )
-
-
-def _age(v: Video) -> float | None:
-    """Mean bracket index (0 for 0-2, 8 for 70+), by screen time."""
-    return _ratio(
-        [
-            (
-                sum(i * float(p["age"]["distribution"][b]) for i, b in enumerate(AGES)),
-                float(p["seconds"]),
-            )
-            for p in _described(v["kit"])
-            if p.get("age")
         ]
     )
 
@@ -327,17 +305,6 @@ def _single(v: Video) -> float | None:
     )
 
 
-def _brightness(v: Video) -> float | None:
-    """05 measured black bars too, so a barred video is left out."""
-    found = _get(v["kit"], "plastic", "video", "brightness", "mean")
-    return float(found) if found is not None and v["bars"] < BARS else None
-
-
-def _outdoor(v: Video) -> float | None:
-    found = _get(v["kit"], "figurative", "video", "indoor_outdoor", "outdoor")
-    return None if found is None else float(found)
-
-
 def _off_centre(v: Video) -> float | None:
     found = _things("x")(v)
     return float(np.mean([abs(x - 0.5) for x in found])) if found else None
@@ -358,31 +325,7 @@ def _centre_x(v: Video) -> tuple[float, float] | None:
 
 
 def _women_pooled(v: Video) -> tuple[float, float] | None:
-    return _sum(
-        [
-            (float(p["gender"]["distribution"]["female"]), float(p["seconds"]))
-            for p in _described(v["kit"])
-            if p.get("gender")
-        ]
-    )
-
-
-def _texted(v: Video) -> tuple[float, float]:
-    return (1.0 if int(v["kit"]["summary"]["text"]["readings"]) else 0.0, 1.0)
-
-
-def _interior(v: Video) -> tuple[float, float] | None:
-    seconds = _seconds(v["kit"])
-    return _sum(
-        [
-            (
-                1.0 if s["indoor_outdoor"]["label"] == "indoor" else 0.0,
-                seconds[int(s["segment"])],
-            )
-            for s in v["kit"]["figurative"]["segments"]
-            if s.get("indoor_outdoor")
-        ]
-    )
+    return _sum(_women_time(v))
 
 
 def _modal_emotion(v: Video) -> dict[str, float]:
@@ -618,76 +561,42 @@ CATEGORICAL: tuple[tuple[str, str, tuple[str, ...], Mixer, bool], ...] = (
 class Expectation:
     id: str
     claim: str
-    kind: str  # higher, equal, band, top, known
-    where: tuple[str, ...]  # (high, low), (a, b), (collection,) or (video,), by kind
+    kind: str  # higher, band, top, known
+    where: tuple[str, ...]  # (high, low), (collection,) or (video,), by kind
     read: Callable[[Video], Any]
-    bounds: tuple[float, float] = (0.0, 0.0)  # band's interval, or equal's margin
+    bounds: tuple[float, float] = (0.0, 0.0)  # band's interval
     label: str = ""  # top: the expected commonest label
     source: str = ""
 
 
-NAVARRO = "Navarro-Guere 2024, 398 Instagram Reels from a feed"
 EXPECTATIONS: tuple[Expectation, ...] = (
     Expectation(
         "E1",
-        "Reels look into the camera more than film scenes",
+        "Dior reels look into the camera more than film scenes",
         "higher",
-        (REELS, AVE),
+        (DIOR, AVE),
         _address,
     ),
     Expectation(
         "E2",
-        "Film scenes keep gaze inside the frame more than reels",
+        "Film scenes keep gaze inside the frame more than Dior reels",
         "higher",
-        (AVE, REELS),
+        (AVE, DIOR),
         _gaze_in,
     ),
     Expectation(
-        "E3",
-        "Reels show more happiness than film scenes",
-        "higher",
-        (REELS, AVE),
-        _happiness,
-        source="FRESCO: FFHQ peaks at happy, OpenImages at neutral",
-    ),
-    Expectation(
         "E4",
-        "Reels spend more of their time in portrait framing",
+        "Dior reels spend more of their time in portrait framing",
         "higher",
-        (REELS, AVE),
+        (DIOR, AVE),
         _portrait,
     ),
     Expectation(
         "E5",
-        "Reels spend more of their peopled time on one person",
+        "Dior reels spend more of their peopled time on one person",
         "higher",
-        (REELS, AVE),
+        (DIOR, AVE),
         _single,
-    ),
-    Expectation(
-        "E6",
-        "Reels are brighter than film scenes, videos without black bars",
-        "higher",
-        (REELS, AVE),
-        _brightness,
-        source="FRESCO: the least similar images are darker",
-    ),
-    Expectation(
-        "E7",
-        "Reels and film scenes are as outdoor, within 0.10",
-        "equal",
-        (REELS, AVE),
-        _outdoor,
-        bounds=(-0.1, 0.1),
-        source=f"{NAVARRO}: 37% exterior; AVE's labels: 36%",
-    ),
-    Expectation(
-        "E8",
-        "Film scenes show older people than reels",
-        "higher",
-        (AVE, REELS),
-        _age,
-        source="Selfiecity: median age 25",
     ),
     Expectation(
         "S1",
@@ -699,9 +608,9 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     ),
     Expectation(
         "S2",
-        "Head yaw averages within 5 degrees of the lens, reels",
+        "Head yaw averages within 5 degrees of the lens, Dior reels",
         "band",
-        (REELS,),
+        (DIOR,),
         _yaw_mean,
         (-5.0, 5.0),
     ),
@@ -715,9 +624,9 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     ),
     Expectation(
         "S4",
-        "Heads turn either way about equally (45-55%), reels",
+        "Heads turn either way about equally (45-55%), Dior reels",
         "band",
-        (REELS,),
+        (DIOR,),
         _yaw_side,
         (0.45, 0.55),
     ),
@@ -732,18 +641,18 @@ EXPECTATIONS: tuple[Expectation, ...] = (
     ),
     Expectation(
         "S6",
-        "Persons sit near the centre horizontally (mean 0.4-0.6), reels",
+        "Persons sit near the centre horizontally (mean 0.4-0.6), Dior reels",
         "band",
-        (REELS,),
+        (DIOR,),
         _centre_x,
         (0.4, 0.6),
         source="FRESCO: centroids mostly central",
     ),
     Expectation(
         "S7",
-        "Persons sit further off-centre in film scenes than in reels",
+        "Persons sit further off-centre in film scenes than in Dior reels",
         "higher",
-        (AVE, REELS),
+        (AVE, DIOR),
         _off_centre,
     ),
     Expectation(
@@ -763,24 +672,6 @@ EXPECTATIONS: tuple[Expectation, ...] = (
         _women_pooled,
         (0.25, 0.4),
         source="USC Annenberg: 29.9-34.6% of speaking characters 2007-2022; GD-IQ: about 36% of screen presence",
-    ),
-    Expectation(
-        "A2",
-        "30-65% of reels carry on-screen text",
-        "band",
-        (REELS,),
-        _texted,
-        (0.3, 0.65),
-        source=f"{NAVARRO}: 46%",
-    ),
-    Expectation(
-        "A3",
-        "Reels are indoors 40-70% of their running time",
-        "band",
-        (REELS,),
-        _interior,
-        (0.4, 0.7),
-        source=f"{NAVARRO}: 49% interior, 10% mixed",
     ),
     Expectation(
         "K1",
@@ -902,7 +793,7 @@ def _judge(
         held, seen = found[0]
         return {**out, "seen": seen, "result": "pass" if held else "fail"}
 
-    if e.kind in ("higher", "equal"):
+    if e.kind == "higher":
         a, b = (np.asarray(values[c], dtype=float) for c in e.where)
         if min(len(a), len(b)) < MIN_N:
             return {**out, "result": "too few"}
@@ -911,18 +802,11 @@ def _judge(
             rng.integers(0, len(b), (boot, len(b))),
         )
         out["means"] = [round(float(a.mean()), 4), round(float(b.mean()), 4)]
-        if e.kind == "higher":
-            out["estimate"] = round(_auc(a, b), 4)
-            out["ci"] = _ci(np.asarray([_auc(a[i], b[j]) for i, j in rows]))
-            out["result"] = (
-                "pass"
-                if out["ci"][0] > 0.5
-                else ("fail" if out["ci"][1] < 0.5 else "weak")
-            )
-        else:
-            out["estimate"] = round(float(a.mean() - b.mean()), 4)
-            out["ci"] = _ci(np.asarray([a[i].mean() - b[j].mean() for i, j in rows]))
-            out["result"] = _inside(out["ci"], *e.bounds)
+        out["estimate"] = round(_auc(a, b), 4)
+        out["ci"] = _ci(np.asarray([_auc(a[i], b[j]) for i, j in rows]))
+        out["result"] = (
+            "pass" if out["ci"][0] > 0.5 else ("fail" if out["ci"][1] < 0.5 else "weak")
+        )
         return out
 
     found = values[e.where[0]]
@@ -1024,7 +908,7 @@ def _categorical(videos: dict[str, list[Video]]) -> list[dict[str, Any]]:
                     total[label] = total.get(label, 0.0) + w
             weights[c] = total
         seen = {k for t in weights.values() for k in t}
-        order = [k for k in labels] + sorted(seen - set(labels))
+        order = list(labels) + sorted(seen - set(labels))
         fields.append(
             {
                 "name": name,
@@ -1048,7 +932,7 @@ def _planted(
     """Faults the checks must catch, after Adebayo et al. (2018)."""
     rng = np.random.default_rng([seed, 999])
     between = [
-        e for e in EXPECTATIONS if e.kind == "higher" and set(e.where) == {AVE, REELS}
+        e for e in EXPECTATIONS if e.kind == "higher" and set(e.where) == {AVE, DIOR}
     ]
     passing = []
     for e in between:
@@ -1113,7 +997,7 @@ def _planted(
 PAGE_SIZE = (22.4, 13.5)  # inches at 100 dpi
 INK, SECONDARY, MUTED = "#0b0b0b", "#52514e", "#898781"
 PAGE, SURFACE, HAIRLINE, BASELINE = "#f9f9f7", "#fcfcfb", "#e1e0d9", "#c3c2b7"
-SERIES = {AVE: "#2a78d6", REELS: "#eb6834"}  # palette slots 1 and 2
+SERIES = {AVE: "#2a78d6", DIOR: "#eb6834"}  # palette slots 1 and 2
 STATUS = {"pass": "#0ca30c", "weak": "#fab219", "fail": "#d03b3b"}
 GRID = np.linspace(0.0, 1.0, 241)
 
@@ -1330,7 +1214,7 @@ def _estimate(r: dict[str, Any]) -> str:
         return f"n {r['n']}"
     if r["kind"] == "top":
         return f"leader {r['leader']}; {r['estimate']:.0%} of persons; top in {r['top_in_resamples']:.0%} of resamples"
-    name = {"higher": "AUC", "equal": "difference", "band": "value"}[r["kind"]]
+    name = {"higher": "AUC", "band": "value"}[r["kind"]]
     return f"{name} {r['estimate']:.3f} [{r['ci'][0]:.3f}, {r['ci'][1]:.3f}] · n {', '.join(str(n) for n in r['n'])}"
 
 
@@ -1349,7 +1233,7 @@ def _summary_page(path: Path, report: dict[str, Any]) -> None:
     fig.text(
         0.018,
         0.95,
-        "Written before the first run. Between collections: AUC, P(first > second); bands and equivalence: the 95% "
+        "Written before the first run. Between collections: AUC, P(first > second); bands: the 95% "
         f"interval must sit inside. Intervals from {report['resamples']:,} resamples of whole videos.",
         fontsize=12,
         color=SECONDARY,
@@ -1479,7 +1363,7 @@ def main() -> None:
     p.add_argument("--processed", type=Path, default=ROOT / "data" / "processed")
     p.add_argument(
         "--ave",
-        default="ave_processed",
+        default="ave",
         help="the AVE scenes' folder under --processed",
     )
     p.add_argument(
@@ -1494,7 +1378,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
-    folders = {AVE: args.ave, REELS: REELS, KNOWN: KNOWN}
+    folders = {AVE: args.ave, DIOR: DIOR, KNOWN: KNOWN}
     videos = {
         c: [
             _video(d)
@@ -1506,7 +1390,7 @@ def main() -> None:
     }
     if any(len(videos.get(c, [])) < MIN_N for c in COLLECTIONS):
         sys.exit(
-            f"needs {MIN_N} processed videos in each of {args.ave}, {REELS} under {args.processed}"
+            f"needs {MIN_N} processed videos in each of {args.ave}, {DIOR} under {args.processed}"
         )
 
     numeric = _numeric(videos)

@@ -18,11 +18,13 @@ from typing import Any, TypeAlias
 import cv2
 import numpy as np
 from matplotlib.axes import Axes
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyBboxPatch, Rectangle
 
 from config import JSON_DIR, PREVIEWS_DIR
+from src.score.similarity import ARCS, Seq, flat_step, transition_mix
 
 ROOT = Path(__file__).resolve().parents[2]
 Array: TypeAlias = np.ndarray[Any, np.dtype[Any]]
@@ -220,9 +222,12 @@ def _tracks_view(root: Path) -> Draw:
             colour = _colour(tid)
             x1, y1, x2, y2 = row["body"]
             if row["interpolated"]:
-                for a, b in (((x1, y1), (x2, y1)), ((x1, y2), (x2, y2))):
-                    _dashed(frame, a, b, colour, 9)
-                for a, b in (((x1, y1), (x1, y2)), ((x2, y1), (x2, y2))):
+                for a, b in (
+                    ((x1, y1), (x2, y1)),
+                    ((x1, y2), (x2, y2)),
+                    ((x1, y1), (x1, y2)),
+                    ((x2, y1), (x2, y2)),
+                ):
                     _dashed(frame, a, b, colour, 9)
                 tag = f"#{tid} interp"
             else:
@@ -716,7 +721,7 @@ def _identity_view(root: Path) -> Draw:
                 continue
             drawn += 1
             pid = int(person["person_id"])
-            colour = PALETTE[pid % len(PALETTE)]
+            colour = _colour(pid)
             if person["abstained"]:
                 colour = (120, 120, 120)
             elif person["linked"]:
@@ -761,6 +766,9 @@ PAGE, SURFACE, HAIRLINE, BASELINE = "#f9f9f7", "#fcfcfb", "#e1e0d9", "#c3c2b7"
 # The reference palette's leading slots, in its order.
 SERIES = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
 SEGMENT_FILL = "#cde2fb"
+ARC_LANE = 0.077  # figure height of one arc on the order page
+ARC_LEFT, ARC_WIDTH, ARC_NOTES = 0.1, 0.6, 0.715  # lane and notes, from the box's left
+ARC_COLOURS = (*SERIES, "#7d5ba6", "#2aa7b8", "#9a9a92")
 CHECK = {
     "consistent": "ok",
     "under_tracked": "under-tracked",
@@ -1578,6 +1586,133 @@ def _enunciative_column(fig: Figure, kit: dict[str, Any]) -> None:
     _framing_table(c, kit["enunciative"]["segments"])
 
 
+def _has_lists(kit: dict[str, Any]) -> bool:
+    return all("keyframes" in s for s in kit["plastic"]["segments"])
+
+
+def _top_changes(changes: dict[str, float] | None, count: int) -> str:
+    ranked = sorted((changes or {}).items(), key=lambda kv: (-kv[1], kv[0]))
+    return ", ".join(f"{k} {v:.0%}" for k, v in ranked[:count])
+
+
+def _arc_lane(
+    c: Column, name: str, kind: str, seq: Seq | None, cuts: list[float]
+) -> None:
+    """One arc over the whole video, and on the right its changes as the score reads them."""
+    fig, top, left = c.fig, c.y, c.x + ARC_LEFT
+    title = name.removesuffix(" arc").capitalize()
+    fig.text(c.x, top - 0.006, title, fontsize=11, weight="bold", color=INK, va="top")
+    lane_top, bottom = top - 0.004, top - ARC_LANE + 0.008
+    order: list[str] = []
+    colours: dict[str, str] = {}
+    if seq and kind == "mix":
+        totals: dict[str, float] = {}
+        for start, end, mix in seq:
+            for label, share in mix.items():
+                totals[label] = totals.get(label, 0.0) + (end - start) * float(share)
+        order = sorted(totals, key=lambda k: (-totals[k], k))
+        colours = {k: ARC_COLOURS[i % len(ARC_COLOURS)] for i, k in enumerate(order)}
+        key = Column(fig, left, lane_top, ARC_WIDTH, c.floor)
+        _legend(key, [(colours[k], k) for k in order], size=8.5)
+        lane_top = key.y
+    ax = fig.add_axes((left, bottom, ARC_WIDTH, lane_top - bottom))
+    _bare(ax)
+    ax.set_xlim(0, 1)
+    for x in cuts:
+        ax.axvline(x, color=HAIRLINE, linewidth=0.6, zorder=0)
+    if seq and kind == "mix":
+        ax.set_ylim(0, 1)
+        for start, end, mix in seq:
+            rest = 1.0
+            for label in order:
+                share = float(mix.get(label, 0.0))
+                rest -= share
+                ax.add_patch(
+                    Rectangle(
+                        (start, rest),
+                        end - start,
+                        share,
+                        facecolor=colours[label],
+                        edgecolor="none",
+                    )
+                )
+    elif seq:
+        values = [float(v) for _, _, v in seq]
+        ax.plot(
+            [s for s, _, _ in seq] + [seq[-1][1]],
+            values + values[-1:],
+            drawstyle="steps-post",
+            color=SERIES[0],
+            linewidth=1.6,
+        )
+        pad = (max(values) - min(values)) * 0.15 or 0.01
+        ax.set_ylim(min(values) - pad, max(values) + pad)
+        fig.text(
+            c.x,
+            top - 0.026,
+            f"{min(values):.2f} to {max(values):.2f}",
+            fontsize=8.5,
+            color=MUTED,
+            va="top",
+        )
+    changes = transition_mix(seq, kind, flat_step([seq], kind))
+    notes = Column(fig, c.x + ARC_NOTES, top - 0.006, c.width - ARC_NOTES, c.floor)
+    notes.text(
+        _top_changes(changes, 4) or "fewer than two keyframes",
+        size=9.5,
+        colour=SECONDARY,
+    )
+    c.y = top - ARC_LANE
+
+
+def _order_page(fig: Figure, kit: dict[str, Any], name: str) -> None:
+    """Every arc the score compares, level by level, over the video's keyframes."""
+    segments = kit["timeline"]["segments"]
+    first = float(segments[0]["start"])
+    length = float(segments[-1]["end"]) - first
+    keyframes = sum(len(s["keyframes"]) for s in kit["plastic"]["segments"])
+    fig.text(
+        0.018,
+        0.988,
+        "Order over keyframes",
+        fontsize=26,
+        weight="bold",
+        color=INK,
+        va="top",
+    )
+    fig.text(
+        0.018,
+        0.95,
+        f"{name}.mp4 · {_count(keyframes, 'keyframe')} in {_count(len(segments), 'segment')}. Each lane is the whole "
+        "video, faint lines are cuts. On the right, the changes between keyframes by share of time; flat is a step "
+        "under half this video's median.",
+        fontsize=12,
+        color=SECONDARY,
+        va="top",
+    )
+    cuts = [(float(s["start"]) - first) / length for s in segments[1:]]
+    y = 0.925
+    for level, title in (
+        ("plastic", "Plastic level"),
+        ("figurative", "Figurative level: emotion pools everyone on screen"),
+        ("enunciative", "Enunciative level"),
+    ):
+        arcs = [(n, kind, read(kit)) for n, lv, kind, read in ARCS if lv == level]
+        height = 0.064 + len(arcs) * ARC_LANE
+        y -= height
+        c = _box(fig, (0.015, y, 0.97, height), title)
+        for arc, kind, seq in arcs:
+            _arc_lane(c, arc, kind, seq, cuts)
+        y -= 0.012
+
+
+def _pixels(fig: Figure) -> Array:
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    out: Array = cv2.cvtColor(np.asarray(canvas.buffer_rgba()), cv2.COLOR_RGBA2BGR)
+    return out
+
+
 def _identikit_page(root: Path, out_path: Path) -> None:
     path = root / "identikit.json"
     if not path.exists():
@@ -1589,7 +1724,12 @@ def _identikit_page(root: Path, out_path: Path) -> None:
     _plastic_column(fig, kit)
     _figurative_column(fig, kit)
     _enunciative_column(fig, kit)
-    fig.savefig(out_path, facecolor=PAGE)
+    pages = [_pixels(fig)]
+    if _has_lists(kit):
+        order = Figure(figsize=PAGE_SIZE, dpi=100, facecolor=PAGE)
+        _order_page(order, kit, root.name)
+        pages.append(_pixels(order))
+    cv2.imwrite(str(out_path), np.vstack(pages))
 
 
 # Similarity page, after FRESCO's Figure 11: the reference, then for each score its nearest,
@@ -1603,9 +1743,10 @@ SCOPES = (
     ("plastic", "Plastic score"),
     ("figurative", "Figurative score"),
     ("enunciative", "Enunciative score"),
+    ("order", "Order only (arc groups)"),
 )
 BLOCKS = ("Top 8: most similar", "Median 8", "Last 8: least similar")
-STRIP = 6  # the reference's keyframes over time
+STRIP = 4  # the reference's keyframes over time
 THUMB_WIDTH = 360  # pixels a keyframe is reduced to before drawing
 
 
@@ -1687,8 +1828,10 @@ def _reference(
     c.y -= height + 0.01
     c.text(_label(name, prefix, 24), size=12.5, weight="bold")
     kit_path = root / "identikit.json"
-    if kit_path.exists():
-        kit = json.loads(kit_path.read_text(encoding="utf-8"))
+    kit: dict[str, Any] | None = (
+        json.loads(kit_path.read_text(encoding="utf-8")) if kit_path.exists() else None
+    )
+    if kit is not None:
         s = kit["summary"]
         c.text(
             f"{s['duration_s']:.1f} s · {_count(s['segments'], 'segment')} · {s.get('medium') or 'medium unknown'}",
@@ -1724,6 +1867,15 @@ def _reference(
             break
         _thumb(fig, (x, y, cell_w, cell_h), _picture(path))
     c.y -= math.ceil(len(chosen) / 2) * (cell_h + 0.006) + 0.01
+    if kit and _has_lists(kit) and "arc_flat" in report:
+        c.text("How it changes, keyframe to keyframe", size=10, colour=MUTED)
+        for arc, _, kind, read in ARCS:
+            changes = transition_mix(read(kit), kind, report["arc_flat"][arc])
+            if changes:
+                c.text(
+                    f"{arc.removesuffix(' arc')}: {_top_changes(changes, 2)}", size=8.5
+                )
+        c.y -= 0.008
     c.text(
         f"Compared with {len(report['videos']) - 1} videos, calibration {report['calibration']}. "
         "Distances run from 0, the same, to 1."
@@ -1743,6 +1895,7 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
     me = names.index(root.name)
     processed = root.parent
     prefix = _shared_prefix(names)
+    scopes = [scope for scope in SCOPES if scope[0] in report["distance"]]
 
     fig = Figure(figsize=PAGE_SIZE, dpi=100, facecolor=PAGE)
     fig.text(
@@ -1769,7 +1922,7 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
     gap, label_h = 0.008, 0.017
     block_w = (right - left - 2 * gap) / 3
     cell_w = block_w / 4
-    row_h = (top - bottom - 0.035) / len(SCOPES)
+    row_h = (top - bottom - 0.035) / len(scopes)
     cell_h = (row_h - 0.014) / 2 - label_h
     for b, title in enumerate(BLOCKS):
         fig.text(
@@ -1784,7 +1937,7 @@ def _similarity_page(root: Path, out_path: Path, report_path: Path) -> None:
         )
 
     stills: dict[str, Array | None] = {}
-    for r, (scope, label) in enumerate(SCOPES):
+    for r, (scope, label) in enumerate(scopes):
         y_top = top - 0.035 - r * row_h
         fig.text(
             left - 0.008,

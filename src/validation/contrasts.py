@@ -1,4 +1,5 @@
-"""Groups AVE's labels tell apart, against the pipeline's values there: python3 src/validation/contrasts.py"""
+"""Groups AVE's labels tell apart, against the pipeline's values there; AVE only, as it needs per-shot labels:
+python3 src/validation/contrasts.py"""
 
 from __future__ import annotations
 
@@ -20,7 +21,7 @@ Row: TypeAlias = dict[str, Any]
 MIN_N = 20  # shots per group needed to judge
 IOU = 0.5  # evaluate_ave's floor for matching an AVE shot to a segment
 
-# value, what it is, AVE field, label expected higher, label expected lower; plausibility.py's, set before its first run
+# value, what it is, AVE field, label expected higher, label expected lower; set before the first run
 CONTRASTS: tuple[tuple[str, str, str, str, str], ...] = (
     ("outdoor", "outdoor probability (05 Places365)", "shot-location", "ext", "int"),
     ("sky", "sky coverage (05 SegFormer)", "shot-location", "ext", "int"),
@@ -216,7 +217,7 @@ def main() -> None:
         description="AVE's label groups against the pipeline's values"
     )
     p.add_argument(
-        "--processed", type=Path, default=ROOT / "data" / "processed" / "ave_processed"
+        "--processed", type=Path, default=ROOT / "data" / "processed" / "ave"
     )
     p.add_argument(
         "--labels",
