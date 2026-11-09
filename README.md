@@ -21,15 +21,16 @@ from keyframe to keyframe.
 | `12-identikit`           | assembles `identikit.json`                                             |
 
 To replicate everything, follow the sections in order; [section 9](#9-replication-order-and-limits)
-is the checklist. Commands run from the repository root, in Git Bash or a Linux shell. Replace
-`YYYY-MM-DD` with the date, so that earlier reports are kept.
+is the checklist. Commands run from the repository root, in PowerShell; on Linux see
+[the note in section 4](#on-linux). Replace `YYYY-MM-DD` with the date, so that earlier reports are kept.
 
 ## 1. Setup
 
-You need Docker with NVIDIA GPU support and [uv](https://docs.astral.sh/uv/). The times below were
+You need Docker with NVIDIA GPU support, [uv](https://docs.astral.sh/uv/) and
+[Git for Windows](https://git-scm.com/download/win), whose `bash.exe` runs the collection loop. The times below were
 measured on an RTX 4070 Laptop GPU (8 GB).
 
-```bash
+```powershell
 docker compose build
 uv sync   # optional: a local .venv on Python 3.10, for your editor
 ```
@@ -38,7 +39,7 @@ uv sync   # optional: a local .venv on Python 3.10, for your editor
 
 Weights (9 GB) go to `models/`. They download automatically before each stage; to fetch them all first:
 
-```bash
+```powershell
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_models
 ```
 
@@ -58,7 +59,7 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_mode
 AVE's labels and a seeded sample of its scenes come from [AVE](https://github.com/dawitmureja/AVE).
 The videos come from YouTube; removed ones are skipped and listed in `unavailable.txt`.
 
-```bash
+```powershell
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave --count 100
 ```
 
@@ -66,7 +67,7 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave 
 
 ### One video
 
-```bash
+```powershell
 # whole pipeline
 docker compose run --rm pipeline data/raw/test/messi.mp4
 
@@ -112,6 +113,39 @@ Each video's output is moved into a collection folder. Finished videos are skipp
 and restart at any time. A third argument processes only that many videos: a fixed random sample, so
 the same clips come up each time and a larger number adds to them.
 
+```powershell
+function Run-Collection($Folder, $Name, $Count = 1000000) {  # $Count: how many videos, default all
+  $script = 'mkdir -p data/processed/$2 data/logs/$2; LC_ALL=C ls $1/*.mp4 | awk ''BEGIN { srand(0) } { print rand(), $0 }'' | LC_ALL=C sort -n | cut -d'' '' -f2- | head -n $3 | while read -r v; do id=$(basename $v .mp4); [ -f data/processed/$2/$id/identikit.json ] && continue; if docker compose run --rm -T pipeline $v > data/logs/$2/$id.log 2>&1 < /dev/null; then mv data/processed/$id data/processed/$2/; else echo FAILED $id; fi; done'
+  & "C:\Program Files\Git\bin\bash.exe" -c $script _ $Folder $Name $Count
+}
+
+Run-Collection data/raw/test tests
+Run-Collection data/raw/ave ave_processed
+Run-Collection data/raw/diorreels/diorreels diorreels
+Run-Collection data/raw/diorreels/diorreels diorreels 100
+```
+
+Paste the function once per terminal. It prints only failures; each video's log is in `data/logs/<name>/`.
+Folder and video names must not contain spaces.
+
+Validation uses the first 50 AVE scenes, which no threshold was fitted on:
+
+```powershell
+New-Item -ItemType Directory -Force data/processed/ave | Out-Null
+$scenes = [string[]](Get-ChildItem data/processed/ave_processed -Directory).Name
+[Array]::Sort($scenes, [StringComparer]::Ordinal)
+$scenes | Select-Object -First 50 | ForEach-Object { Copy-Item -Recurse "data/processed/ave_processed/$_" data/processed/ave/ }
+```
+
+Expect about 100 MB of output per minute of video, so roughly 100 GB for the Dior reels.
+
+### On Linux
+
+Every `docker compose` and `uv` command in this guide works unchanged. Only these three differ:
+
+<details>
+<summary>The collection loop, the AVE copy and the UCO-LAEO download, in bash</summary>
+
 ```bash
 run_collection() {  # <folder of .mp4 files> <collection name under data/processed> [how many, default all]
   mkdir -p "data/processed/$2" "data/logs/$2"
@@ -127,22 +161,18 @@ run_collection() {  # <folder of .mp4 files> <collection name under data/process
   done
 }
 
-run_collection data/raw/test tests
-run_collection data/raw/ave ave_processed
-run_collection data/raw/diorreels/diorreels diorreels
+
 run_collection data/raw/diorreels/diorreels diorreels 100
-```
 
-Validation uses the first 50 AVE scenes, which no threshold was fitted on:
-
-```bash
 mkdir -p data/processed/ave
 LC_ALL=C ls data/processed/ave_processed | head -50 | while read -r id; do
   cp -r "data/processed/ave_processed/$id" data/processed/ave/
 done
+
+mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
 ```
 
-Expect about 100 MB of output per minute of video, so roughly 100 GB for the Dior reels.
+</details>
 
 ## 5. Previews
 
@@ -158,7 +188,7 @@ folder under `data/processed`.
 | `identikit`   | 12: the record as a page, then a second page, *Order over keyframes*, with every arc the score compares  |
 | `similarity`  | the score's ranking, after FRESCO's Figure 11, with the order-only ranking. Only when named; see section 6 |
 
-```bash
+```powershell
 # one clip, all views (similarity excluded)
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi
 
@@ -166,10 +196,7 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi --views relations
 
 # a whole collection, identikit pages only
-docker compose run --rm -T --entrypoint bash pipeline -c '
-for d in data/processed/diorreels/*/; do
-  python3 -m src.tools.preview "diorreels/$(basename "$d")" --views identikit
-done'
+docker compose run --rm -T --entrypoint bash pipeline -c 'for d in data/processed/diorreels/*/; do python3 -m src.tools.preview diorreels/$(basename $d) --views identikit; done'
 ```
 
 Files appear in `data/processed/<video>/previews/`: `<view>_preview.mp4`, `identikit.png` and
@@ -185,21 +212,17 @@ It reports each video's nearest neighbours and k-medoids clusters. Only videos i
 compared, and identikits written before the keyframe lists existed are refused until their video is
 rerun.
 
-```bash
+```powershell
 # score a collection
-docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
-  --processed data/processed/diorreels --out data/score/diorreels_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/diorreels --out data/score/diorreels_YYYY-MM-DD.json
 
-docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
-  --processed data/processed/ave_processed --out data/score/ave_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/ave_processed --out data/score/ave_YYYY-MM-DD.json
 
 # also print one pair, field by field, and choose the number of clusters
-docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity \
-  --processed data/processed/tests --out data/score/tests_YYYY-MM-DD.json --clusters 3 --explain messi anime
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/tests --out data/score/tests_YYYY-MM-DD.json --clusters 3 --explain messi anime
 
 # one video's nearest, median and farthest, by level and by order alone
-docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview \
-  diorreels/<video_name> --views similarity --score data/score/diorreels_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview diorreels/0-3657668001364317985-0 --views similarity --score data/score/diorreels_YYYY-MM-DD.json
 ```
 
 ## 7. Validation on AVE and Dior reels
@@ -208,27 +231,23 @@ Each report lands where `--out` says, with its figures beside it.
 
 **Against AVE's per-shot labels** (AVE only, since Dior has no labels):
 
-```bash
+```powershell
 # every scene against AVE's labels
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py \
-  --processed data/processed/ave --out data/validation/ave_50_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --processed data/processed/ave --out data/validation/ave_50_YYYY-MM-DD.json
 
 # 11 groups the labels tell apart, such as exterior against interior
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py \
-  --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
 ```
 
 **Distributions and consistency** compare AVE with the Dior reels. Both need at least 20 videos in each
 collection. Expectations are checked against intervals from resampled videos.
 
-```bash
+```powershell
 # every identikit field's distribution, after FRESCO's Figures 9 and 10; test clips appear as marks
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py \
-  --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
 
 # people and topics across models per keyframe, after FRESCO's Tables 3-5
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py \
-  --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
 ```
 
 `consistency` caches YuNet's faces and a Mask2Former rerun beside its report, and fetches CLIP (1.6 GB)
@@ -238,11 +257,10 @@ MobileCLIP.
 **Refitting 09's camera thresholds** (optional). Each rule is fitted on AVE scenes 51-100 and scored on
 1-50, so `data/processed/ave` must exist:
 
-```bash
+```powershell
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave --stride 2
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py evaluate \
-  --out data/validation/camera/camera_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py evaluate --out data/validation/camera/camera_YYYY-MM-DD.json
 ```
 
 ## 8. Comparisons with the state of the art
@@ -256,26 +274,24 @@ CameraBench's `gate` step.
 benchmark's own scorer. `gate` checks the code against 06's and 09's output on the test clips; skip it if
 you do not have them.
 
-```bash
+```powershell
 docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_camerabench
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py gate
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py shots
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py boxes
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py pairs 
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py score \
-  --out data/validation/camera/camerabench_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py pairs
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_camera.py score --out data/validation/camera/camerabench_YYYY-MM-DD.json
 ```
 
 ### Shot size on ShotBench
 
 12's shot-size rule on ShotBench's shot-size questions.
 
-```bash
+```powershell
 docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_shotbench
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py detect
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py features
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py score \
-  --out data/validation/shot/shotbench_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_shotbench.py score --out data/validation/shot/shotbench_YYYY-MM-DD.json
 ```
 
 ### Looks-at on UCO-LAEO
@@ -284,24 +300,23 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate
 it on MTGS's test pairs from VSGaze, the like-for-like comparison. Gaze-LLE's output is cached beside the
 report (about 25 minutes the first time), so a rerun only rescores.
 
-```bash
-mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
+```powershell
+New-Item -ItemType Directory -Force data/raw/ucolaeo | Out-Null
+curl.exe -L -o data/raw/ucolaeo/ucolaeodb_v1.1.tgz http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz
+tar.exe -xzf data/raw/ucolaeo/ucolaeodb_v1.1.tgz -C data/raw/ucolaeo
 uv run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py
 
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --protocol mtgs \
-  --out data/validation/laeo_mtgs_YYYY-MM-DD.json
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py \
-  --out data/validation/laeo_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --protocol mtgs --out data/validation/laeo_mtgs_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --out data/validation/laeo_YYYY-MM-DD.json
 ```
 
 ### Identity on VPCD
 
 08's rule on [VPCD](https://www.robots.ox.ac.uk/~vgg/data/vpcd/)'s person clustering, from its own features.
 
-```bash
+```powershell
 docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.download_vpcd
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_identity.py \
-  --out data/validation/identity/vpcd_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_identity.py --out data/validation/identity/vpcd_YYYY-MM-DD.json
 ```
 
 ## 9. Replication order and limits
