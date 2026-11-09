@@ -21,18 +21,15 @@ from keyframe to keyframe.
 | `12-identikit`           | assembles `identikit.json`                                             |
 
 To replicate everything, follow the sections in order; [section 9](#9-replication-order-and-limits)
-is the checklist. Commands run from the repository root, in PowerShell; on Linux see
-[the note in section 4](#on-linux). Replace `YYYY-MM-DD` with the date, so that earlier reports are kept.
+is the checklist. Commands run from the repository root, and work the same in PowerShell and in a Linux shell. Replace `YYYY-MM-DD` with the date, so that earlier reports are kept.
 
 ## 1. Setup
 
-You need Docker with NVIDIA GPU support, [uv](https://docs.astral.sh/uv/) and
-[Git for Windows](https://git-scm.com/download/win), whose `bash.exe` runs the collection loop. The times below were
-measured on an RTX 4070 Laptop GPU (8 GB).
+You only need Docker with NVIDIA GPU support. The times below were measured on an RTX 4070 Laptop GPU
+(8 GB).
 
 ```powershell
 docker compose build
-uv sync   # optional: a local .venv on Python 3.10, for your editor
 ```
 
 ## 2. Model weights
@@ -114,65 +111,22 @@ and restart at any time. A third argument processes only that many videos: a fix
 the same clips come up each time and a larger number adds to them.
 
 ```powershell
-function Run-Collection($Folder, $Name, $Count = 1000000) {  # $Count: how many videos, default all
-  $script = 'mkdir -p data/processed/$2 data/logs/$2; LC_ALL=C ls $1/*.mp4 | awk ''BEGIN { srand(0) } { print rand(), $0 }'' | LC_ALL=C sort -n | cut -d'' '' -f2- | head -n $3 | while read -r v; do id=$(basename $v .mp4); [ -f data/processed/$2/$id/identikit.json ] && continue; if docker compose run --rm -T pipeline $v > data/logs/$2/$id.log 2>&1 < /dev/null; then mv data/processed/$id data/processed/$2/; else echo FAILED $id; fi; done'
-  & "C:\Program Files\Git\bin\bash.exe" -c $script _ $Folder $Name $Count
-}
-
-Run-Collection data/raw/test tests
-Run-Collection data/raw/ave ave_processed
-Run-Collection data/raw/diorreels/diorreels diorreels
-Run-Collection data/raw/diorreels/diorreels diorreels 100
+docker compose run --rm -T --entrypoint bash pipeline src/tools/run_collection.sh data/raw/test tests
+docker compose run --rm -T --entrypoint bash pipeline src/tools/run_collection.sh data/raw/ave ave_processed
+docker compose run --rm -T --entrypoint bash pipeline src/tools/run_collection.sh data/raw/diorreels/diorreels diorreels
+docker compose run --rm -T --entrypoint bash pipeline src/tools/run_collection.sh data/raw/diorreels/diorreels diorreels 100
 ```
 
-Paste the function once per terminal. It prints only failures; each video's log is in `data/logs/<name>/`.
-Folder and video names must not contain spaces.
+It prints only failures; each video's log is in `data/logs/<name>/`.
 
-Validation uses the first 50 AVE scenes, which no threshold was fitted on:
+`evaluate_ave` and the camera refit in section 7 also need the first 50 AVE scenes, which no threshold
+was fitted on:
 
 ```powershell
-New-Item -ItemType Directory -Force data/processed/ave | Out-Null
-$scenes = [string[]](Get-ChildItem data/processed/ave_processed -Directory).Name
-[Array]::Sort($scenes, [StringComparer]::Ordinal)
-$scenes | Select-Object -First 50 | ForEach-Object { Copy-Item -Recurse "data/processed/ave_processed/$_" data/processed/ave/ }
+docker compose run --rm -T --entrypoint bash pipeline src/tools/copy_ave_subset.sh
 ```
 
 Expect about 100 MB of output per minute of video, so roughly 100 GB for the Dior reels.
-
-### On Linux
-
-Every `docker compose` and `uv` command in this guide works unchanged. Only these three differ:
-
-<details>
-<summary>The collection loop, the AVE copy and the UCO-LAEO download, in bash</summary>
-
-```bash
-run_collection() {  # <folder of .mp4 files> <collection name under data/processed> [how many, default all]
-  mkdir -p "data/processed/$2" "data/logs/$2"
-  LC_ALL=C ls "$1"/*.mp4 | awk 'BEGIN { srand(0) } { print rand(), $0 }' | LC_ALL=C sort -n |
-    cut -d' ' -f2- | head -n "${3:-1000000}" | while read -r v; do
-    id=$(basename "$v" .mp4)
-    [ -f "data/processed/$2/$id/identikit.json" ] && continue
-    if docker compose run --rm -T pipeline "$v" > "data/logs/$2/$id.log" 2>&1 < /dev/null; then
-      mv "data/processed/$id" "data/processed/$2/"
-    else
-      echo "FAILED $id"
-    fi
-  done
-}
-
-
-run_collection data/raw/diorreels/diorreels diorreels 100
-
-mkdir -p data/processed/ave
-LC_ALL=C ls data/processed/ave_processed | head -50 | while read -r id; do
-  cp -r "data/processed/ave_processed/$id" data/processed/ave/
-done
-
-mkdir -p data/raw/ucolaeo && curl -L http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz | tar xz -C data/raw/ucolaeo
-```
-
-</details>
 
 ## 5. Previews
 
@@ -196,12 +150,12 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi --views relations
 
 # a whole collection, identikit pages only
-docker compose run --rm -T --entrypoint bash pipeline -c 'for d in data/processed/diorreels/*/; do python3 -m src.tools.preview diorreels/$(basename $d) --views identikit; done'
+docker compose run --rm -T --entrypoint bash pipeline src/tools/preview_collection.sh diorreels
 ```
 
 Files appear in `data/processed/<video>/previews/`: `<view>_preview.mp4`, `identikit.png` and
-`similarity.png`. For a collection, drop `--views identikit` to render every video view too; that is
-slow and takes a lot of disk.
+`similarity.png`. For a collection, name more views after it to render those too, as in
+`preview_collection.sh diorreels tracks identikit`; video views are slow and take a lot of disk.
 
 ## 6. Similarity between videos
 
@@ -229,14 +183,18 @@ docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview di
 
 Each report lands where `--out` says, with its figures beside it.
 
-**Against AVE's per-shot labels** (AVE only, since Dior has no labels):
+**Against AVE's per-shot labels** (AVE only, since Dior has no labels). The camera, shot-size and
+indoor/outdoor rules were fitted on AVE scenes 51-100, so for those three fields quote the 50-scene
+report; for everything else, such as cuts and people, use all 100. In `contrasts`, only the steady
+against handheld check uses a fitted threshold.
 
 ```powershell
 # every scene against AVE's labels
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --processed data/processed/ave --out data/validation/ave_50_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --processed data/processed/ave_processed --out data/validation/ave_full_YYYY-MM-DD.json
 
 # 11 groups the labels tell apart, such as exterior against interior
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py --processed data/processed/ave --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
 ```
 
 **Distributions and consistency** compare AVE with the Dior reels. Both need at least 20 videos in each
@@ -244,10 +202,10 @@ collection. Expectations are checked against intervals from resampled videos.
 
 ```powershell
 # every identikit field's distribution, after FRESCO's Figures 9 and 10; test clips appear as marks
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py --ave ave --out data/validation/distributions/distributions_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py --out data/validation/distributions/distributions_YYYY-MM-DD.json
 
 # people and topics across models per keyframe, after FRESCO's Tables 3-5
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py --ave ave --out data/validation/consistency/consistency_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/consistency.py --out data/validation/consistency/consistency_YYYY-MM-DD.json
 ```
 
 `consistency` caches YuNet's faces and a Mask2Former rerun beside its report, and fetches CLIP (1.6 GB)
@@ -301,10 +259,8 @@ it on MTGS's test pairs from VSGaze, the like-for-like comparison. Gaze-LLE's ou
 report (about 25 minutes the first time), so a rerun only rescores.
 
 ```powershell
-New-Item -ItemType Directory -Force data/raw/ucolaeo | Out-Null
-curl.exe -L -o data/raw/ucolaeo/ucolaeodb_v1.1.tgz http://rabinf24.uco.es/ucolaeo/ucolaeodb_v1.1.tgz
-tar.exe -xzf data/raw/ucolaeo/ucolaeodb_v1.1.tgz -C data/raw/ucolaeo
-uv run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py
+docker compose run --rm -T --entrypoint bash pipeline src/tools/download_ucolaeo.sh
+docker compose run --rm -T --entrypoint uv pipeline run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py
 
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --protocol mtgs --out data/validation/laeo_mtgs_YYYY-MM-DD.json
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_laeo.py --out data/validation/laeo_YYYY-MM-DD.json

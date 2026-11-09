@@ -1557,7 +1557,7 @@ def main() -> None:
     p.add_argument("--processed", type=Path, default=ROOT / "data" / "processed")
     p.add_argument(
         "--ave",
-        default="ave",
+        default="ave_processed",
         help="the AVE scenes' folder under --processed",
     )
     p.add_argument(

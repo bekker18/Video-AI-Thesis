@@ -1,5 +1,6 @@
 """Downloads VSGaze's annotations into data/raw/vsgaze/ and writes its UCO-LAEO files as JSON; reading them needs
-PyTables, which the image lacks: uv run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py"""
+PyTables, which the image lacks, so run it through the image's uv:
+docker compose run --rm -T --entrypoint uv pipeline run --no-project --python 3.10 --with pandas --with tables python src/tools/download_vsgaze.py"""
 
 from __future__ import annotations
 

@@ -217,7 +217,7 @@ def main() -> None:
         description="AVE's label groups against the pipeline's values"
     )
     p.add_argument(
-        "--processed", type=Path, default=ROOT / "data" / "processed" / "ave"
+        "--processed", type=Path, default=ROOT / "data" / "processed" / "ave_processed"
     )
     p.add_argument(
         "--labels",
