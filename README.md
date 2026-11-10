@@ -54,7 +54,10 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_mode
 | VPCD        | identity (08)                   | [section 8](#identity-on-vpcd)                                                                       | 5.7 GB | `data/raw/vpcd/`                |
 
 AVE's labels and a seeded sample of its scenes come from [AVE](https://github.com/dawitmureja/AVE).
-The videos come from YouTube; removed ones are skipped and listed in `unavailable.txt`.
+The sample leaves out the 100 scenes the thresholds were fitted and tested on (`src/tools/ave_used.txt`),
+so every scene it downloads is new to the pipeline. The videos come from YouTube; removed ones are
+skipped and listed in `unavailable.txt`. Which videos YouTube allows depends on the country, so machines
+in different places can end up with a few different scenes.
 
 ```powershell
 docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave --count 100

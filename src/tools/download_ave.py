@@ -1,4 +1,5 @@
-"""Downloads AVE's labels and a seeded sample of its scenes into data/raw/ave/: python3 -m src.tools.download_ave [--count 200]"""
+"""Downloads AVE's labels and a seeded sample of its scenes, leaving out the 100 in ave_used.txt that the
+thresholds were fitted and tested on, into data/raw/ave/: python3 -m src.tools.download_ave [--count 100]"""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "raw" / "ave"
+USED = Path(__file__).with_name("ave_used.txt")  # scenes 1-50 tested and 51-100 fitted on, by name
 
 LABELS = (
     "https://drive.usercontent.google.com/download"
@@ -56,7 +58,7 @@ def labels() -> dict[str, Any]:
 
 
 def download(scene: str) -> str:
-    """Empty on success, else yt-dlp's last error line."""
+    """Empty on success, else yt-dlp's last error lines: a geo-block's reason comes before a hint line."""
     result = subprocess.run(
         [
             *YT_DLP,
@@ -80,7 +82,7 @@ def download(scene: str) -> str:
     if result.returncode == 0 and (OUT / f"{scene}.mp4").exists():
         return ""
     lines = result.stderr.strip().splitlines()
-    return lines[-1] if lines else f"yt-dlp exited {result.returncode}"
+    return " ".join(lines[-3:]) if lines else f"yt-dlp exited {result.returncode}"
 
 
 def gone(error: str) -> bool:
@@ -90,12 +92,14 @@ def gone(error: str) -> bool:
 
 def main() -> None:
     p = argparse.ArgumentParser(description="Download AVE's labels and scenes")
-    p.add_argument("--count", type=int, default=200, help="scenes to have on disk")
+    p.add_argument("--count", type=int, default=100, help="scenes to have on disk")
     args = p.parse_args()
 
     OUT.mkdir(parents=True, exist_ok=True)
+    used = set(USED.read_text(encoding="utf-8").split())
     scenes = sorted(labels())
     random.Random(SEED).shuffle(scenes)
+    scenes = [s for s in scenes if s not in used]
 
     skip_path = OUT / "unavailable.txt"
     unavailable: set[str] = (
@@ -116,13 +120,13 @@ def main() -> None:
             error = download(scene)
         if not error:
             have.add(scene)
-            print(f"[{len(have)}/{args.count}] {scene}")
+            print(f"[{len(have)}/{args.count}] {scene}", flush=True)
             continue
         if not gone(error):
             sys.exit(f"{scene}: {error}\nstopped; rerun to resume")
         unavailable.add(scene)
         skip_path.write_text("\n".join(sorted(unavailable)) + "\n", encoding="utf-8")
-        print(f"unavailable {scene}: {error}")
+        print(f"unavailable {scene}: {error}", flush=True)
 
     print(f"{len(have)} scenes in {OUT}, {len(unavailable)} unavailable")
 
