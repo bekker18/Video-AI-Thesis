@@ -1,4 +1,5 @@
-"""Scores the pipeline against AVE's per-shot labels, over every AVE scene in data/processed/: python3 src/validation/evaluate_ave.py"""
+"""Scores the pipeline against AVE's per-shot labels, over every AVE scene in data/processed/ave_processed/:
+python3 src/validation/evaluate_ave.py"""
 
 from __future__ import annotations
 
@@ -253,7 +254,9 @@ def main() -> None:
         type=Path,
         default=ROOT / "data" / "raw" / "ave" / "annotations.json",
     )
-    p.add_argument("--processed", type=Path, default=ROOT / "data" / "processed")
+    p.add_argument(
+        "--processed", type=Path, default=ROOT / "data" / "processed" / "ave_processed"
+    )
     p.add_argument(
         "--out", type=Path, default=ROOT / "data" / "validation" / "ave.json"
     )

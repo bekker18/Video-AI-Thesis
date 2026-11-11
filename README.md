@@ -122,13 +122,6 @@ docker compose run --rm -T --entrypoint bash pipeline src/tools/run_collection.s
 
 It prints only failures; each video's log is in `data/logs/<name>/`.
 
-`evaluate_ave` and the camera refit in section 7 also need the first 50 AVE scenes, which no threshold
-was fitted on:
-
-```powershell
-docker compose run --rm -T --entrypoint bash pipeline src/tools/copy_ave_subset.sh
-```
-
 Expect about 100 MB of output per minute of video, so roughly 100 GB for the Dior reels.
 
 ## 5. Previews
@@ -186,15 +179,12 @@ docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview di
 
 Each report lands where `--out` says, with its figures beside it.
 
-**Against AVE's per-shot labels** (AVE only, since Dior has no labels). The camera, shot-size and
-indoor/outdoor rules were fitted on AVE scenes 51-100, so for those three fields quote the 50-scene
-report; for everything else, such as cuts and people, use all 100. In `contrasts`, only the steady
-against handheld check uses a fitted threshold.
+**Against AVE's per-shot labels** (AVE only, since Dior has no labels), over every scene in
+`data/processed/ave_processed`.
 
 ```powershell
 # every scene against AVE's labels
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --processed data/processed/ave --out data/validation/ave_50_YYYY-MM-DD.json
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --processed data/processed/ave_processed --out data/validation/ave_full_YYYY-MM-DD.json
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_ave.py --out data/validation/ave_YYYY-MM-DD.json
 
 # 11 groups the labels tell apart, such as exterior against interior
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
@@ -214,15 +204,6 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/consiste
 `consistency` caches YuNet's faces and a Mask2Former rerun beside its report, and fetches CLIP (1.6 GB)
 into `models/validation/` on the first run. Add `--encoders` to also compare CLIP with the pipeline's
 MobileCLIP.
-
-**Refitting 09's camera thresholds** (optional). Each rule is fitted on AVE scenes 51-100 and scored on
-1-50, so `data/processed/ave` must exist:
-
-```powershell
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py pairs --collections ave --stride 2
-docker compose run --rm -T --entrypoint python3 pipeline src/validation/tune_camera.py evaluate --out data/validation/camera/camera_YYYY-MM-DD.json
-```
 
 ## 8. Comparisons with the state of the art
 
