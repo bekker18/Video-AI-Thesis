@@ -204,7 +204,7 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrast
 collection. Expectations are checked against intervals from resampled videos.
 
 ```powershell
-# every identikit field's distribution, after FRESCO's Figures 9 and 10; test clips appear as marks
+# every identikit field's distribution, after FRESCO's Figures 9 and 10
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/distributions.py --out data/validation/distributions/distributions_YYYY-MM-DD.json
 
 # people and topics across models per keyframe, after FRESCO's Tables 3-5

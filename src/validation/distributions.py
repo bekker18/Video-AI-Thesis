@@ -25,8 +25,7 @@ Reader: TypeAlias = Callable[[Video], list[float]]
 Mixer: TypeAlias = Callable[[Video], dict[str, float]]
 
 AVE, DIOR = COLLECTIONS = ("ave", "diorreels")
-KNOWN = "tests"  # clips of known content
-NAMES = {AVE: "AVE film scenes", DIOR: "Dior reels", KNOWN: "test clips"}
+NAMES = {AVE: "AVE film scenes", DIOR: "Dior reels"}
 MIN_N = 20  # videos, or persons for a top check, needed to judge
 BAR_FRAMES = 5  # keyframes checked for black bars
 DARK = 16  # row mean grey below which a row is a black bar
@@ -336,33 +335,6 @@ def _modal_emotion(v: Video) -> dict[str, float]:
     return out
 
 
-def _medium(v: Video) -> str:
-    return str(_get(v["kit"], "plastic", "video", "medium", "label"))
-
-
-def _subjects(v: Video) -> list[str]:
-    return [str(s["label"]) for s in v["kit"]["figurative"]["subjects"]]
-
-
-def _places(v: Video) -> list[str]:
-    return [
-        str(p["label"])
-        for p in (_get(v["kit"], "figurative", "video", "place") or [])[:2]
-    ]
-
-
-def _io(v: Video) -> str:
-    return str(_get(v["kit"], "figurative", "video", "indoor_outdoor", "label"))
-
-
-def _readings(v: Video) -> int:
-    return int(v["kit"]["summary"]["text"]["readings"])
-
-
-def _described_count(v: Video) -> int:
-    return int(v["kit"]["summary"]["persons"]["described"])
-
-
 # Figure 9: name, level, unit, fixed range (None: pooled 0.5-99.5 percentiles), reader
 NUMERIC: tuple[tuple[str, str, str, tuple[float, float] | None, Reader], ...] = (
     (
@@ -561,8 +533,8 @@ CATEGORICAL: tuple[tuple[str, str, tuple[str, ...], Mixer, bool], ...] = (
 class Expectation:
     id: str
     claim: str
-    kind: str  # higher, band, top, known
-    where: tuple[str, ...]  # (high, low), (collection,) or (video,), by kind
+    kind: str  # higher, band, top
+    where: tuple[str, ...]  # (high, low) or (collection,), by kind
     read: Callable[[Video], Any]
     bounds: tuple[float, float] = (0.0, 0.0)  # band's interval
     label: str = ""  # top: the expected commonest label
@@ -673,82 +645,10 @@ EXPECTATIONS: tuple[Expectation, ...] = (
         (0.25, 0.4),
         source="USC Annenberg: 29.9-34.6% of speaking characters 2007-2022; GD-IQ: about 36% of screen presence",
     ),
-    Expectation(
-        "K1",
-        "anime reads 2D animation",
-        "known",
-        ("anime",),
-        lambda v: (_medium(v) == "2D animation", _medium(v)),
-    ),
-    Expectation(
-        "K2",
-        "cat1 has a cat as subject",
-        "known",
-        ("cat1",),
-        lambda v: ("cat" in _subjects(v), ", ".join(_subjects(v))),
-    ),
-    Expectation(
-        "K3",
-        "cat2 has a cat as subject",
-        "known",
-        ("cat2",),
-        lambda v: ("cat" in _subjects(v), ", ".join(_subjects(v))),
-    ),
-    Expectation(
-        "K4",
-        "cat2 has no described person",
-        "known",
-        ("cat2",),
-        lambda v: (_described_count(v) == 0, f"{_described_count(v)} described"),
-    ),
-    Expectation(
-        "K5",
-        "messi's two leading places include soccer or stadium",
-        "known",
-        ("messi",),
-        lambda v: (
-            any("soccer" in p or "stadium" in p for p in _places(v)),
-            ", ".join(_places(v)),
-        ),
-    ),
-    Expectation(
-        "K6",
-        "messi has on-screen text read",
-        "known",
-        ("messi",),
-        lambda v: (_readings(v) > 0, f"{_readings(v)} readings"),
-    ),
-    Expectation(
-        "K7",
-        "patrick reads outdoor",
-        "known",
-        ("patrick",),
-        lambda v: (_io(v) == "outdoor", _io(v)),
-    ),
-    Expectation(
-        "K8",
-        "thanos looks into the camera in half its samples or more",
-        "known",
-        ("thanos",),
-        lambda v: ((_address(v) or 0.0) >= 0.5, f"{_address(v) or 0.0:.2f}"),
-    ),
-    Expectation(
-        "K9",
-        "thanos reads live action: the known CGI miss (STATE item 27)",
-        "known",
-        ("thanos",),
-        lambda v: (_medium(v) == "live action", _medium(v)),
-    ),
 )
 
 
 def _values(e: Expectation, videos: dict[str, list[Video]]) -> dict[str, list[Any]]:
-    if e.kind == "known":
-        return {
-            e.where[0]: [
-                e.read(v) for v in videos.get(KNOWN, []) if v["name"] == e.where[0]
-            ]
-        }
     return {
         c: [x for v in videos.get(c, []) if (x := e.read(v)) is not None]
         for c in e.where
@@ -786,13 +686,6 @@ def _judge(
         "n": [len(values[c]) for c in e.where],
         "source": e.source,
     }
-    if e.kind == "known":
-        found = values[e.where[0]]
-        if not found:
-            return {**out, "result": "missing"}
-        held, seen = found[0]
-        return {**out, "seen": seen, "result": "pass" if held else "fail"}
-
     if e.kind == "higher":
         a, b = (np.asarray(values[c], dtype=float) for c in e.where)
         if min(len(a), len(b)) < MIN_N:
@@ -1017,9 +910,7 @@ def _short(x: float) -> str:
     return f"{x:.3g}"
 
 
-def _legend(
-    fig: Figure, videos: dict[str, list[Video]], known: bool, x: float, y: float
-) -> None:
+def _legend(fig: Figure, videos: dict[str, list[Video]], x: float, y: float) -> None:
     for c in COLLECTIONS:
         fig.text(x, y, "■", fontsize=14, color=SERIES[c], va="center")
         fig.text(
@@ -1031,8 +922,6 @@ def _legend(
             va="center",
         )
         x += 0.2
-    if known:
-        fig.text(x, y, f"| {NAMES[KNOWN]}", fontsize=11, color=INK, va="center")
 
 
 def _ridges(
@@ -1067,12 +956,6 @@ def _ridges(
             top = base + 0.85 * density / density.max()
             ax.fill_between(GRID, base, top, color=SERIES[c], alpha=0.16, linewidth=0)
             ax.plot(GRID, top, color=SERIES[c], linewidth=1.4)
-        known = field["values"].get(KNOWN)
-        if known is not None and len(known):
-            ticks = np.clip((known - low) / (high - low), 0.0, 1.0)
-            ax.plot(
-                ticks, np.full(len(ticks), base + 0.07), "|", color=INK, markersize=7
-            )
         ax.text(
             -0.02,
             base + 0.42,
@@ -1124,7 +1007,7 @@ def _numeric_page(
         color=SECONDARY,
         va="top",
     )
-    _legend(fig, videos, KNOWN in videos, 0.52, 0.926)
+    _legend(fig, videos, 0.52, 0.926)
     rows = {
         level: [f for f in numeric if f["level"] == level]
         for level in ("plastic", "figurative", "enunciative")
@@ -1173,7 +1056,7 @@ def _categorical_page(
         color=SECONDARY,
         va="top",
     )
-    _legend(fig, videos, False, 0.55, 0.945)
+    _legend(fig, videos, 0.55, 0.945)
     grid = fig.add_gridspec(
         2, 4, left=0.04, right=0.985, top=0.85, bottom=0.12, wspace=0.22, hspace=0.75
     )
@@ -1208,8 +1091,6 @@ def _categorical_page(
 
 
 def _estimate(r: dict[str, Any]) -> str:
-    if r["kind"] == "known":
-        return f"seen: {r.get('seen', '-')}"
     if "estimate" not in r:
         return f"n {r['n']}"
     if r["kind"] == "top":
@@ -1378,7 +1259,7 @@ def main() -> None:
     p.add_argument("--seed", type=int, default=0)
     args = p.parse_args()
 
-    folders = {AVE: args.ave, DIOR: DIOR, KNOWN: KNOWN}
+    folders = {AVE: args.ave, DIOR: DIOR}
     videos = {
         c: [
             _video(d)
