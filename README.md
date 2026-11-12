@@ -188,6 +188,9 @@ docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate
 
 # 11 groups the labels tell apart, such as exterior against interior
 docker compose run --rm -T --entrypoint python3 pipeline src/validation/contrasts.py --out data/validation/contrasts/contrasts_YYYY-MM-DD.json
+
+# the similarity score against profiles built from AVE's labels, beside MobileCLIP and CLIP ViT-L/14
+docker compose run --rm -T --entrypoint python3 pipeline src/validation/evaluate_score.py --out data/validation/score/score_ave_YYYY-MM-DD.json
 ```
 
 **Distributions and consistency** compare AVE with the Dior reels. Both need at least 20 videos in each
