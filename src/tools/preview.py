@@ -1,5 +1,5 @@
 """Renders 06, 07, 08 and 10 over the source video, draws 12's identikit as a page, and on request a
-video's nearest and farthest by the similarity score: python3 -m src.tools.preview messi [--views ...]"""
+video's nearest and farthest by the similarity score: python3 -m src.tools.preview tests/football [--views ...]"""
 
 from __future__ import annotations
 
@@ -2025,7 +2025,7 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Render pipeline output over the source video"
     )
-    p.add_argument("video", help="video name under data/processed/, e.g. messi")
+    p.add_argument("video", help="video name under data/processed/, e.g. tests/football")
     views = sorted([*VIEWS, PAGE_VIEW])
     p.add_argument(
         "--views",

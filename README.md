@@ -46,7 +46,7 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_mode
 | ----------- | ------------------------------- | --------------------------------------------------------------------------------------------------- | ------ | --------------------------------- |
 | AVE         | pipeline, validation            | command below                                                                                       | 2.1 GB | `data/raw/ave/`                 |
 | Dior reels  | pipeline, validation, score     | **not public**: supply your own `.mp4` files                                                | 7.6 GB | `data/raw/diorreels/diorreels/` |
-| Test clips  | sanity checks                   | **not public**: `anime`, `cat1`, `cat2`, `messi`, `neymar`, `patrick`, `thanos` | small  | `data/raw/test/`                |
+| Test clips  | sanity checks                   | **not public**: `animation`, `cat_alone`, `cat_hand`, `cgi`, `dialogue`, `football`, `street` | small  | `data/raw/test/`                |
 | CameraBench | camera movement (09)            | [section 8](#camera-movement-on-camerabench)                                                         | 4.1 GB | `data/raw/camerabench/`         |
 | ShotBench   | shot size (12)                  | [section 8](#shot-size-on-shotbench)                                                                 | 341 MB | `data/raw/shotbench/`           |
 | UCO-LAEO    | who looks at whom (10)          | [section 8](#looks-at-on-uco-laeo)                                                                   | 4.1 GB | `data/raw/ucolaeo/`             |
@@ -69,10 +69,10 @@ docker compose run --rm --entrypoint python3 pipeline -m src.tools.download_ave 
 
 ```powershell
 # whole pipeline
-docker compose run --rm pipeline data/raw/test/messi.mp4
+docker compose run --rm pipeline data/raw/test/football.mp4
 
 # one stage on its own, once its inputs exist
-docker compose run --rm pipeline data/raw/test/messi.mp4 --stages 02-segmentation
+docker compose run --rm pipeline data/raw/test/football.mp4 --stages 02-segmentation
 
 # every option and its default
 docker compose run --rm pipeline --help
@@ -140,10 +140,10 @@ folder under `data/processed`.
 
 ```powershell
 # one clip, all views (similarity excluded)
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/football
 
 # one clip, one view
-docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/messi --views relations
+docker compose run --rm --entrypoint python3 pipeline -m src.tools.preview tests/football --views relations
 
 # a whole collection, identikit pages only
 docker compose run --rm -T --entrypoint bash pipeline src/tools/preview_collection.sh diorreels
@@ -169,7 +169,7 @@ docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity
 docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/ave_processed --out data/score/ave_YYYY-MM-DD.json
 
 # also print one pair, field by field, and choose the number of clusters
-docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/tests --out data/score/tests_YYYY-MM-DD.json --clusters 3 --explain messi anime
+docker compose run --rm -T --entrypoint python3 pipeline -m src.score.similarity --processed data/processed/tests --out data/score/tests_YYYY-MM-DD.json --clusters 3 --explain football animation
 
 # one video's nearest, median and farthest, by level and by order alone
 docker compose run --rm -T --entrypoint python3 pipeline -m src.tools.preview diorreels/0-3657668001364317985-0 --views similarity --score data/score/diorreels_YYYY-MM-DD.json
