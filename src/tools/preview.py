@@ -136,15 +136,19 @@ def _rows(tracks: dict[str, Any]) -> dict[tuple[int, int, int], dict[str, Any]]:
 
 
 def _banner(frame: Array, left: str, right: str, live: bool) -> None:
+    """Left and right on one line, or right on a second line where a narrow (vertical) frame cannot hold both."""
     width = frame.shape[1]
-    cv2.rectangle(frame, (0, 0), (width, 26), (14, 14, 14), -1)
+    left_w = cv2.getTextSize(left, FONT, 0.5, 1)[0][0]
+    right_w = cv2.getTextSize(right, FONT, 0.42, 1)[0][0]
+    two = left_w + right_w + 30 > width
+    cv2.rectangle(frame, (0, 0), (width, 44 if two else 26), (14, 14, 14), -1)
     cv2.putText(
         frame, left, (10, 18), FONT, 0.5, (90, 230, 140) if live else (150, 150, 150), 1
     )
     cv2.putText(
         frame,
         right,
-        (max(10, width - 8 * len(right) - 10), 18),
+        (10, 37) if two else (max(10, width - right_w - 10), 18),
         FONT,
         0.42,
         (150, 150, 150),
@@ -2025,7 +2029,9 @@ def main() -> None:
     p = argparse.ArgumentParser(
         description="Render pipeline output over the source video"
     )
-    p.add_argument("video", help="video name under data/processed/, e.g. tests/football")
+    p.add_argument(
+        "video", help="video name under data/processed/, e.g. tests/football"
+    )
     views = sorted([*VIEWS, PAGE_VIEW])
     p.add_argument(
         "--views",

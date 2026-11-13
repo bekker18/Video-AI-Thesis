@@ -557,14 +557,14 @@ EXPECTATIONS: tuple[Expectation, ...] = (
         _gaze_in,
     ),
     Expectation(
-        "E4",
+        "E3",
         "Dior reels spend more of their time in portrait framing",
         "higher",
         (DIOR, AVE),
         _portrait,
     ),
     Expectation(
-        "E5",
+        "E4",
         "Dior reels spend more of their peopled time on one person",
         "higher",
         (DIOR, AVE),
