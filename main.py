@@ -124,6 +124,11 @@ def parse_args() -> argparse.Namespace:
         default=0.0,
         help="soft gate: fraction of a shot's keyframes a flag must hold in",
     )
+    p.add_argument(
+        "--route-all",
+        action="store_true",
+        help="fire every expert on every shot, to measure what routing saves",
+    )
 
     p.add_argument(
         "--map-size",
@@ -339,6 +344,7 @@ def main() -> None:
             text_conf=args.text_conf,
             scenes=args.scenes,
             router_agreement=args.router_agreement,
+            route_all=args.route_all,
             map_size=args.map_size,
             expert_batch=args.expert_batch,
             seg_model=args.seg_model,

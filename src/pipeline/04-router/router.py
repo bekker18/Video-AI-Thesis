@@ -176,6 +176,9 @@ def run(cfg: Config) -> dict[str, Any]:
     for shot in profile["shots"]:
         facts = _facts(shot, cfg.router_agreement)
         decisions = _decisions(facts)
+        if cfg.route_all:
+            for d in decisions:
+                d["fired"] = True
         active = [d["expert"] for d in decisions if d["fired"]]
 
         for name in active:

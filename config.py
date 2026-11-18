@@ -46,6 +46,7 @@ class Config:
 
     # 04-router
     router_agreement: float  # fraction of keyframes a flag must hold in; 0 = off
+    route_all: bool  # fire every expert on every shot, to measure what routing saves
 
     # 05-global-experts
     map_size: int  # longest side of every dense map written
