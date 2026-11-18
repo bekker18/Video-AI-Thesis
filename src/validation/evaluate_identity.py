@@ -1,13 +1,19 @@
-"""08's identity rule on VPCD (Brown et al., ICCVW 2021), beside MuHPC reimplemented without voice:
-python3 src/validation/evaluate_identity.py --out <report>"""
+"""08's identity rule on VPCD (Brown et al., ICCVW 2021), beside MuHPC reimplemented without voice.
+Fit 08's thresholds on VPCD's validation episodes only, and carry them to our models by rate:
+python3 src/validation/evaluate_identity.py --fit --out <fit> --ours <processed collections>
+then score every episode once with the fitted thresholds:
+python3 src/validation/evaluate_identity.py --fitted <fit> --out <report>"""
 
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
+import os
 import pickle
 import sys
 import time
+from multiprocessing import Pool
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, TypeAlias
@@ -28,21 +34,18 @@ CACHE = ROOT / "data" / "validation" / "identity" / "vpcd_tracks.npz"
 SERIES = ("TBBT", "Buffy", "Sherlock", "Friends", "Hidden_Figures", "About_Last_Night")
 TUNING = {f"Friends/episode0{i}" for i in range(1, 6)}  # VPCD's validation set
 MIN_AREA = 1600  # 08's --identity-min-area
-# 08's thresholds, and the share of different-people pairs passing them on our videos (below, for the veto)
-RATES = {
-    "face_within": 0.0888,
-    "face_across": 0.0445,
-    "body_within": 0.2577,
-    "body_across": 0.3806,
-    "face_veto": 0.9194,
+MIN_FRONT = 0.15  # 08's --identity-min-front
+KEYS = ("face_within", "face_across", "body_within", "body_across", "face_veto")
+# where the fit starts: 08's thresholds before fitting, carried to VPCD's features by rate without labels
+START = {
+    "face_within": 0.5621,
+    "face_across": 0.4651,
+    "body_within": 0.7669,
+    "body_across": 0.6868,
+    "face_veto": 0.327,
 }
-OURS = {
-    "face_within": 0.311,
-    "face_across": 0.449,
-    "body_within": 0.575,
-    "body_across": 0.512,
-    "face_veto": 0.331,
-}
+STEP = 0.025  # coordinate search
+WCP_FLOOR = 97.4  # our MuHPC run's WCP on the validation episodes
 DUPLICATE = 0.5  # IoU of one person boxed twice
 TIGHT, BACK, RATIO = 0.48, 0.4, 0.9  # MuHPC's settings
 BOOT, SEED = 2000, 0
@@ -338,22 +341,102 @@ def _cosines(data: dict[str, Array], kind: str, pairs: Array) -> Array:
     return out
 
 
-def _transfer(data: dict[str, Array]) -> dict[str, Any]:
-    """08's thresholds at the same rates on VPCD's different-people pairs."""
-    pairs = data["pairs"][~data["double"]]
-    out: dict[str, Any] = {"rates": RATES, "ours": OURS}
-    for kind in ("face", "body"):
-        different = _cosines(data, kind, pairs)
-        out[f"{kind}_pairs"] = len(different)
-        for scope in ("within", "across"):
-            out[f"{kind}_{scope}"] = round(
-                float(np.quantile(different, 1 - RATES[f"{kind}_{scope}"])), 4
-            )
-        if kind == "face":
-            out["face_veto"] = round(
-                float(np.quantile(different, RATES["face_veto"])), 4
-            )
+def _rates(face: Array, body: Array, limits: dict[str, float]) -> dict[str, float]:
+    """Share of different-people pairs each threshold lets through; for the veto, the share it blocks."""
+    out = {
+        f"{kind}_{scope}": float((cos >= limits[f"{kind}_{scope}"]).mean())
+        for kind, cos in (("face", face), ("body", body))
+        for scope in ("within", "across")
+    }
+    out["face_veto"] = float((face < limits["face_veto"]).mean())
     return out
+
+
+def _at_rates(face: Array, body: Array, rates: dict[str, float]) -> dict[str, float]:
+    """The thresholds that let the same shares of these different-people pairs through."""
+    out = {
+        f"{kind}_{scope}": round(
+            float(np.quantile(cos, 1 - rates[f"{kind}_{scope}"])), 3
+        )
+        for kind, cos in (("face", face), ("body", body))
+        for scope in ("within", "across")
+    }
+    out["face_veto"] = round(float(np.quantile(face, rates["face_veto"])), 3)
+    return out
+
+
+def _vpcd_pairs(data: dict[str, Array], episodes: set[int]) -> tuple[Array, Array]:
+    """Face and body cosines of tracks sharing a frame, one person boxed twice left out."""
+    pairs = data["pairs"][~data["double"]]
+    pairs = pairs[np.isin(data["episode"][pairs[:, 0]], list(episodes))]
+    return _cosines(data, "face", pairs), _cosines(data, "body", pairs)
+
+
+def _our_pairs(collections: list[Path]) -> tuple[Array, Array]:
+    """The same on our processed videos: tracks of one segment sharing a frame, pass zero's merges left out."""
+    cfg = SimpleNamespace(identity_min_area=MIN_AREA, identity_min_front=MIN_FRONT)
+    face: list[float] = []
+    body: list[float] = []
+    for folder in collections:
+        for video in sorted(
+            d for d in folder.iterdir() if (d / "json" / "tracks.json").exists()
+        ):
+            tracks_meta = json.loads(
+                (video / "json" / "tracks.json").read_text(encoding="utf-8")
+            )
+            conditional = json.loads(
+                (video / "json" / "conditional.json").read_text(encoding="utf-8")
+            )
+            tables = {
+                kind: IDENTITY._load(video / "embeddings", f"{kind}_embeddings.npy")
+                for kind in ("face", "body")
+            }
+            rows = {
+                (int(s["index"]), int(t["track_id"])): t.get("attributes", {})
+                for s in conditional["shots"]
+                for t in s["tracks"]
+            }
+            tracks = []
+            for shot in tracks_meta["shots"]:
+                if not shot["tracked"]:
+                    continue
+                for track in shot["tracks"]:
+                    key = (int(shot["index"]), int(track["track_id"]))
+                    found = {}
+                    for kind, field in (
+                        ("face", "embedding_rows"),
+                        ("body", "body_rows"),
+                    ):
+                        keep = {
+                            int(c["frame"])
+                            for c in track["crops"][kind]
+                            if IDENTITY._usable(c, cfg, kind)
+                        }
+                        found[kind] = IDENTITY._descriptor(
+                            list(rows.get(key, {}).get(field, [])), keep, tables[kind]
+                        )
+                    tracks.append(
+                        {
+                            "segment": key[0],
+                            "frames": {int(r["frame"]) for r in track["frames"]},
+                            "observed": {
+                                int(r["frame"]): r
+                                for r in track["frames"]
+                                if not r["interpolated"]
+                            },
+                            **found,
+                        }
+                    )
+            for a, b in itertools.combinations(tracks, 2):
+                if a["segment"] != b["segment"] or not (a["frames"] & b["frames"]):
+                    continue
+                if IDENTITY._same_face(a, b, 0.0, 0.0) is not None:
+                    continue
+                if a["face"] is not None and b["face"] is not None:
+                    face.append(float(a["face"] @ b["face"]))
+                if a["body"] is not None and b["body"] is not None:
+                    body.append(float(a["body"] @ b["body"]))
+    return np.asarray(face), np.asarray(body)
 
 
 def _segments(starts: Array, ends: Array) -> Array:
@@ -369,11 +452,117 @@ def _segments(starts: Array, ends: Array) -> Array:
     return segment
 
 
+def _cluster(
+    units: list[dict[str, Any]],
+    pairs: list[tuple[int, int]],
+    face_min: float,
+    body_min: float,
+    link: Any,
+) -> list[list[int]]:
+    """08's `_cluster`, same order and same answers, but a group pair that failed complete linkage is
+    not checked again until one of the two groups grows. Returns the member indices of each group."""
+    scored: list[tuple[float, int, int]] = []
+    for i, j in pairs:
+        found = link(units[i], units[j], face_min, body_min)
+        if found is not None:
+            scored.append((float(found["similarity"]), i, j))
+    scored.sort(key=lambda s: (-s[0], units[s[1]]["keys"][0], units[s[2]]["keys"][0]))
+    allowed = {(i, j) for i, j in pairs} | {(j, i) for i, j in pairs}
+    members = {i: [i] for i in range(len(units))}
+    owner = list(range(len(units)))
+    grown = [0] * len(units)
+    failed: dict[tuple[int, int], tuple[int, int]] = {}
+    for _, i, j in scored:
+        left, right = owner[i], owner[j]
+        if left == right:
+            continue
+        stamp = (grown[left], grown[right])
+        if failed.get((left, right)) == stamp:
+            continue
+        joined = [(x, y) for x in members[left] for y in members[right]]
+        if any((x, y) not in allowed for x, y in joined) or any(
+            link(units[x], units[y], face_min, body_min) is None for x, y in joined
+        ):
+            failed[(left, right)] = stamp
+            continue
+        members[left] += members[right]
+        for index in members[right]:
+            owner[index] = left
+        del members[right]
+        grown[left] += 1
+    return sorted(members.values(), key=lambda g: units[g[0]]["keys"][0])
+
+
+def _merged(
+    units: list[dict[str, Any]], groups: list[list[int]]
+) -> list[dict[str, Any]]:
+    """Groups as 08 merges them: keys, frames and the mean face and body."""
+    out = [
+        {
+            "keys": sorted(k for i in g for k in units[i]["keys"]),
+            "frames": set().union(*(units[i]["frames"] for i in g)),
+            "links": [],
+            "face": IDENTITY._mean([units[i]["face"] for i in g]),
+            "body": IDENTITY._mean([units[i]["body"] for i in g]),
+            "face_crops": sum(units[i]["face_crops"] for i in g),
+            "body_crops": sum(units[i]["body_crops"] for i in g),
+        }
+        for g in groups
+    ]
+    out.sort(key=lambda u: u["keys"][0])
+    return out
+
+
+def _remembered() -> Any:
+    """08's link test, each pair's answer kept: complete linkage asks for it again at every merge."""
+    seen: dict[tuple[int, int], Any] = {}
+
+    def link(
+        a: dict[str, Any], b: dict[str, Any], face_min: float, body_min: float
+    ) -> Any:
+        key = (id(a), id(b))
+        if key not in seen:
+            seen[key] = IDENTITY._link(a, b, face_min, body_min)
+        return seen[key]
+
+    return link
+
+
 def _run08(units: list[dict[str, Any]], limits: dict[str, Any]) -> Array:
-    """08's own grouping after pass zero; abstained tracks stay alone."""
-    active = [u for u in units if u["face"] is not None or u["body"] is not None]
-    cfg = SimpleNamespace(**{f"identity_{k}": limits[k] for k in RATES if k != "face_veto"})
-    final = IDENTITY._resolve(active, cfg)[0]
+    """08's own passes one and two after pass zero; abstained tracks stay alone."""
+    IDENTITY.FACE_VETO = limits["face_veto"]
+    active = [
+        dict(u, links=[])
+        for u in units
+        if u["face"] is not None or u["body"] is not None
+    ]
+    by_segment: dict[int, list[int]] = {}
+    for i, unit in enumerate(active):
+        by_segment.setdefault(int(unit["keys"][0][0]), []).append(i)
+    within = [
+        (i, j)
+        for group in by_segment.values()
+        for i, j in itertools.combinations(group, 2)
+        if not (active[i]["frames"] & active[j]["frames"])
+    ]
+    after = _merged(
+        active,
+        _cluster(
+            active, within, limits["face_within"], limits["body_within"], _remembered()
+        ),
+    )
+    across = [
+        (i, j)
+        for i, j in itertools.combinations(range(len(after)), 2)
+        if {k[0] for k in after[i]["keys"]}.isdisjoint({k[0] for k in after[j]["keys"]})
+        and not (after[i]["frames"] & after[j]["frames"])
+    ]
+    final = _merged(
+        after,
+        _cluster(
+            after, across, limits["face_across"], limits["body_across"], _remembered()
+        ),
+    )
     pred = np.full(len(units), -1, dtype=np.int64)
     for c, unit in enumerate(final):
         for key in unit["keys"]:
@@ -538,17 +727,161 @@ def _interval(
     return out
 
 
+def _units(data: dict[str, Array], e: int) -> tuple[list[dict[str, Any]], Array]:
+    """One episode's tracks as 08's units, cut into segments wherever no track continues."""
+    idx = np.flatnonzero(data["episode"] == e)
+    frames = [
+        set(data["frames"][o : o + n].tolist())
+        for o, n in zip(data["offsets"][idx], data["lengths"][idx])
+    ]
+    segment = _segments(
+        np.array([min(f) for f in frames]), np.array([max(f) for f in frames])
+    )
+    units = []
+    for i, g in enumerate(idx):
+        units.append(
+            {
+                "keys": [[int(segment[i]), i]],
+                "frames": frames[i],
+                "links": [],
+                "face": None
+                if np.isnan(data["face"][g, 0])
+                else data["face"][g].astype(np.float64),
+                "body": None
+                if np.isnan(data["body"][g, 0])
+                else data["body"][g].astype(np.float64),
+                "face_crops": int(data["face_crops"][g]),
+                "body_crops": int(data["body_crops"][g]),
+            }
+        )
+    return units, data["label"][idx]
+
+
+_EPISODES: list[tuple[list[dict[str, Any]], Array]] = []
+_SCORING: dict[str, Any] = {}  # data and limits, shared with the scoring processes
+
+
+def _score_episode(e: int) -> tuple[Any, Any, Any, Any, dict[str, int]]:
+    """08, MuHPC and faces alone on one episode."""
+    data, limits = _SCORING["data"], _SCORING["limits"]
+    units, truth = _units(data, e)
+    idx = np.flatnonzero(data["episode"] == e)
+    frames = [u["frames"] for u in units]
+    segment = np.array([u["keys"][0][0] for u in units])
+    blocked = _blocked(frames)
+    back = data["back"][idx]
+    mean_face = data["mean_face"][idx].astype(np.float64)
+    mean_body = data["mean_body"][idx].astype(np.float64)
+    people = np.flatnonzero(~back)
+    stage1 = _first_neighbours(
+        mean_face[people], blocked[np.ix_(people, people)].astype(float)
+    )
+    span = max(max(f) for f in frames) - min(min(f) for f in frames) + 1
+    return (
+        _scores(_run08(units, limits), truth),
+        _scores(_muhpc(mean_face, mean_body, back, segment, blocked), truth),
+        _scores(stage1, truth[people], data["face_detections"][idx][people]),
+        {
+            "segments": int(segment.max() + 1),
+            "frames_per_segment": round(span / (segment.max() + 1), 1),
+        },
+        {
+            "tracks": len(units),
+            "abstained": sum(u["face"] is None and u["body"] is None for u in units),
+            "face_descriptors": sum(u["face"] is not None for u in units),
+            "body_descriptors": sum(u["body"] is not None for u in units),
+        },
+    )
+
+
+def _validation(limits: dict[str, float]) -> tuple[float, float]:
+    """Mean NMI and WCP over the validation episodes."""
+    scores = [_scores(_run08(u, limits), truth) for u, truth in _EPISODES]
+    return float(np.mean([s["nmi"] for s in scores])), float(
+        np.mean([s["wcp"] for s in scores])
+    )
+
+
+def _fit(data: dict[str, Array]) -> dict[str, Any]:
+    """Coordinate search from START in steps of STEP: highest validation NMI with WCP at WCP_FLOOR or above."""
+    names = data["names"].tolist()
+    _EPISODES.extend(_units(data, names.index(n)) for n in sorted(TUNING))
+    best = dict(START)
+    nmi, wcp = _validation(best)
+    trace = [{"limits": dict(best), "nmi": round(nmi, 2), "wcp": round(wcp, 2)}]
+    print(f"start: NMI {nmi:.2f}, WCP {wcp:.2f}", flush=True)
+    with Pool(os.cpu_count()) as pool:
+        while True:
+            moved = False
+            for key in KEYS:
+                values = [
+                    round(START[key] + STEP * n, 4)
+                    for n in range(-40, 41)
+                    if 0 < START[key] + STEP * n < 1
+                ]
+                trials = [dict(best, **{key: v}) for v in values]
+                for t, (n, w) in zip(trials, pool.map(_validation, trials)):
+                    if w >= WCP_FLOOR and n > nmi + 1e-9:
+                        best, nmi, wcp, moved = t, n, w, True
+                trace.append(
+                    {"limits": dict(best), "nmi": round(nmi, 2), "wcp": round(wcp, 2)}
+                )
+                print(f"{key}: {best[key]} -> NMI {nmi:.2f}, WCP {wcp:.2f}", flush=True)
+            if not moved:
+                break
+    return {
+        "limits": best,
+        "validation": {"nmi": round(nmi, 2), "wcp": round(wcp, 2)},
+        "trace": trace,
+    }
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--rebuild", action="store_true", help="read VPCD's pickles again")
     p.add_argument("--series", nargs="*", default=list(SERIES), choices=SERIES)
+    p.add_argument(
+        "--fit", action="store_true", help="fit on the validation episodes only"
+    )
+    p.add_argument(
+        "--ours", type=Path, nargs="*", default=[], help="our processed collections"
+    )
+    p.add_argument(
+        "--fitted", type=Path, help="a --fit report whose thresholds are scored"
+    )
     args = p.parse_args()
     if args.rebuild or not CACHE.exists():
         _build()
     data = dict(np.load(CACHE, allow_pickle=False))
-    limits = _transfer(data)
-    IDENTITY.FACE_VETO = limits["face_veto"]
+    if args.fit:
+        fit = _fit(data)
+        tuning = {i for i, n in enumerate(data["names"].tolist()) if n in TUNING}
+        vpcd = _vpcd_pairs(data, tuning)
+        rates = _rates(*vpcd, fit["limits"])
+        fit |= {
+            "about": "fitted on VPCD's validation episodes (Friends 1-5); no test episode was read",
+            "start": START,
+            "step": STEP,
+            "wcp_floor": WCP_FLOOR,
+            "rates": {k: round(v, 4) for k, v in rates.items()},
+            "vpcd_pairs": {"face": len(vpcd[0]), "body": len(vpcd[1])},
+        }
+        if args.ours:
+            ours = _our_pairs(args.ours)
+            fit["ours"] = _at_rates(*ours, rates)
+            fit["our_pairs"] = {
+                "collections": [str(c) for c in args.ours],
+                "face": len(ours[0]),
+                "body": len(ours[1]),
+            }
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(fit, indent=1), encoding="utf-8")
+        print(json.dumps({k: v for k, v in fit.items() if k != "trace"}, indent=1))
+        return
+    if args.fitted is None:
+        sys.exit("score with --fitted <fit report>, made by --fit")
+    limits = json.loads(args.fitted.read_text(encoding="utf-8"))["limits"]
     print(json.dumps(limits), flush=True)
 
     methods = ("08", "MuHPC face + body, ours")
@@ -556,76 +889,26 @@ def main() -> None:
     faces_only: dict[str, dict[str, float]] = {}
     shots: dict[str, dict[str, float]] = {}
     counts = {"tracks": 0, "abstained": 0, "face_descriptors": 0, "body_descriptors": 0}
-    for e, name in enumerate(data["names"].tolist()):
-        if name.split("/")[0] not in args.series:
-            continue
-        t = time.time()
-        idx = np.flatnonzero(data["episode"] == e)
-        frames = [
-            set(data["frames"][o : o + n].tolist())
-            for o, n in zip(data["offsets"][idx], data["lengths"][idx])
-        ]
-        starts = np.array([min(f) for f in frames])
-        ends = np.array([max(f) for f in frames])
-        segment = _segments(starts, ends)
-        truth = data["label"][idx]
-        units = []
-        for i, g in enumerate(idx):
-            face = (
-                None
-                if np.isnan(data["face"][g, 0])
-                else data["face"][g].astype(np.float64)
+    episodes = [
+        e
+        for e, name in enumerate(data["names"].tolist())
+        if name.split("/")[0] in args.series
+    ]
+    _SCORING.update(data=data, limits=limits)
+    with Pool(os.cpu_count()) as pool:
+        done = pool.imap(_score_episode, episodes)
+        for e, (ours, muhpc, faces, shot, found) in zip(episodes, done):
+            name = data["names"][e]
+            results["08"][name] = ours
+            results["MuHPC face + body, ours"][name] = muhpc
+            faces_only[name], shots[name] = faces, shot
+            for key, value in found.items():
+                counts[key] += value
+            print(
+                f"{name}: {found['tracks']} tracks, {shot['segments']} segments, "
+                f"08 NMI {ours['nmi']:.1f}, MuHPC NMI {muhpc['nmi']:.1f}",
+                flush=True,
             )
-            body = (
-                None
-                if np.isnan(data["body"][g, 0])
-                else data["body"][g].astype(np.float64)
-            )
-            units.append(
-                {
-                    "keys": [[int(segment[i]), i]],
-                    "frames": frames[i],
-                    "links": [],
-                    "face": face,
-                    "body": body,
-                    "face_crops": int(data["face_crops"][g]),
-                    "body_crops": int(data["body_crops"][g]),
-                }
-            )
-        counts["tracks"] += len(units)
-        counts["abstained"] += sum(
-            u["face"] is None and u["body"] is None for u in units
-        )
-        counts["face_descriptors"] += sum(u["face"] is not None for u in units)
-        counts["body_descriptors"] += sum(u["body"] is not None for u in units)
-        blocked = _blocked(frames)
-        back = data["back"][idx]
-        results["08"][name] = _scores(_run08(units, limits), truth)
-        mean_face, mean_body = (
-            data["mean_face"][idx].astype(np.float64),
-            data["mean_body"][idx].astype(np.float64),
-        )
-        results["MuHPC face + body, ours"][name] = _scores(
-            _muhpc(mean_face, mean_body, back, segment, blocked), truth
-        )
-        people = np.flatnonzero(~back)
-        stage1 = _first_neighbours(
-            mean_face[people], blocked[np.ix_(people, people)].astype(float)
-        )
-        faces_only[name] = _scores(
-            stage1, truth[people], data["face_detections"][idx][people]
-        )
-        span = int(ends.max() - starts.min() + 1)
-        shots[name] = {
-            "segments": int(segment.max() + 1),
-            "frames_per_segment": round(span / (segment.max() + 1), 1),
-        }
-        print(
-            f"{name}: {len(units)} tracks, {shots[name]['segments']} segments, "
-            f"08 NMI {results['08'][name]['nmi']:.1f}, MuHPC NMI "
-            f"{results['MuHPC face + body, ours'][name]['nmi']:.1f}, {time.time() - t:.0f} s",
-            flush=True,
-        )
 
     def tuning(n: str) -> bool:
         return n in TUNING
@@ -644,6 +927,7 @@ def main() -> None:
             "frontality": "not in VPCD: off",
             "pass_zero": "off: one track per person per frame",
             "thresholds": limits,
+            "fitted": str(args.fitted),
             "muhpc": {"tight": TIGHT, "back": BACK, "ratio": RATIO},
         },
         "tracks": counts,
